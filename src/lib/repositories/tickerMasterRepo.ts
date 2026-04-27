@@ -10,7 +10,7 @@ export type TickerRow = {
 }
 
 // These symbols match the ticker regex but are never real tickers.
-const BLOCKLIST = new Set([
+export const BLOCKLIST = new Set([
   'CEO', 'CFO', 'COO', 'CTO', 'SEC', 'FDA', 'USA', 'GDP', 'IRS',
   'ETF', 'IPO', 'LLC', 'INC', 'NYSE', 'NASD', 'SPAC', 'ESG',
 ])
@@ -26,6 +26,20 @@ export async function isValidTicker(symbol: string): Promise<boolean> {
     .maybeSingle()
   if (error) throw error
   return data !== null
+}
+
+// Single DB call to validate a batch of candidate symbols.
+// Returns only the symbols that exist in tickers_master as active.
+export async function validateTickerBatch(symbols: string[]): Promise<string[]> {
+  if (symbols.length === 0) return []
+  const db = createServiceClient()
+  const { data, error } = await db
+    .from('tickers_master')
+    .select('ticker_symbol')
+    .in('ticker_symbol', symbols)
+    .eq('active', true)
+  if (error) throw error
+  return (data as { ticker_symbol: string }[]).map((r) => r.ticker_symbol)
 }
 
 export async function bulkUpsertTickers(rows: Omit<TickerRow, 'created_at'>[]): Promise<void> {
