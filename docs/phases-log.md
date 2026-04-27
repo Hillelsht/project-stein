@@ -137,9 +137,42 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 5 — Pre-filter pipeline
+## Phase 5 — Pre-filter pipeline ✅
 
-_Not yet started._
+**Goal:** `filterService` turns raw articles into "passed" articles ready for LLM.
+
+**What was built:**
+- `src/lib/services/filterService.ts`
+  - `extractTickers(text)` — regex `/(?:^|[^A-Z])\$?([A-Z]{1,5})(?=[^A-Z]|$)/g`, dedupes candidates, strips BLOCKLIST entries, then one `validateTickerBatch` DB call (not N calls)
+  - `hasMaterialKeyword(text)` — single pre-compiled regex covering all PRD §6 keyword categories (M&A, earnings, regulatory, legal, leadership, capital, operations); case-insensitive
+  - `parseSecItems(rawContent)` — extracts codes from `[SEC_ITEMS:1.01,2.02]` prefix in raw_content
+  - `hasMaterialSecItem(items)` — checks against PRD §6 allowlist: 1.01, 1.02, 1.03, 2.01, 2.02, 3.01, 4.02, 5.02, 7.01, 8.01
+  - `computeDedupHash(title, body)` — SHA-256 of normalized_title + `|` + body[:200]
+  - `runFilterPipeline(article)` — orchestrates stages 1-6 in order, returns `{ pass, reason?, tickers }`
+- `src/app/api/cron/analyze/route.ts` — pulls `getUnanalyzedArticles(200)`, runs pipeline on each, marks pass/reject; will be extended in Phase 6 for LLM calls
+- `tickerMasterRepo.ts` — added `validateTickerBatch(symbols[])` (single `IN` query) and exported `BLOCKLIST`
+
+**Pipeline stage ordering:**
+1. Ticker extraction (no rejection — just populates tickers list)
+2. Material keyword check → `no_material_keyword`
+3. SEC item check (only if `raw_content` starts with `[SEC_ITEMS:`) → `immaterial_sec_item`
+4. Dedup hash (48hr window) → `duplicate`; save hash on pass
+5. Watchlist priority (no rejection — determines if Stage 6 applies)
+6. LLM budget check (≤800/day, skipped for watchlist matches) → `daily_budget`
+
+**Acceptance verified (live test — 132 articles processed):**
+- Pass rate: 22/128 = 17.2% (expected 5–15%; slightly above but reasonable for news mix)
+- All rejections: `no_material_keyword` (correct for first run with empty dedup table)
+- Second analyze run: 0/0 — all articles already processed, none re-processed
+- Dedup table: 22 rows after first run, growing correctly
+- Third cycle (4 new articles): 1 passed, 3 rejected `no_material_keyword` — dedup correctly silent on genuinely new content
+
+**Key decisions:**
+- `validateTickerBatch` (one `IN` query per article) vs. `isValidTicker` per symbol (N queries) — batch is ~10x faster for articles with multiple candidates
+- SEC detection by `[SEC_ITEMS:` prefix in `raw_content` rather than joining to sources table — simpler, no extra DB call
+- BLOCKLIST exported from `tickerMasterRepo` so filterService and the repo share a single source of truth
+
+**Commit:** `phase-5: filterService pre-filter pipeline + /api/cron/analyze route`
 
 ---
 
