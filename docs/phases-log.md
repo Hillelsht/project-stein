@@ -111,9 +111,29 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 4 — Ticker master seed
+## Phase 4 — Ticker master seed ✅
 
-_Not yet started._
+**Goal:** `tickers_master` populated with real US tickers so ticker validation works.
+
+**What was built:**
+- `src/lib/services/tickerMasterService.ts`
+  - `refreshTickerMaster()` — fetches both NASDAQ Trader files in parallel, parses, merges, bulk upserts
+  - `parseNasdaqListed()` — pipe-delimited, skips Test Issue = Y, rejects symbols not matching `/^[A-Z]{1,5}$/` (filters warrants, preferred shares, units with special chars)
+  - `parseOtherListed()` — same logic for NYSE/other exchanges
+  - Merge strategy: NASDAQ rows win on symbol conflict (more specific exchange info)
+  - `NewTickerRow = Omit<TickerRow, 'created_at'>` — insert type without DB-generated field
+- `src/app/api/cron/refresh-tickers/route.ts` — same CRON_SECRET auth pattern
+
+**Acceptance verified:**
+- 11,981 rows upserted (5,425 NASDAQ + 6,556 other, deduplicated)
+- `isValidTicker('AAPL')` → true (Apple Inc. - Common Stock, NASDAQ)
+- `isValidTicker('CEO')` → false (0 rows in DB, also in in-code blocklist)
+- Total in DB: 11,981 (Content-Range: 0-999/11981)
+
+**Bug found and fixed during implementation:**
+- `ftp.nasdaqtrader.com` times out from this network; switched to `www.nasdaqtrader.com` (same files, accessible via HTTPS)
+
+**Commit:** `phase-4: tickerMasterService + /api/cron/refresh-tickers route`
 
 ---
 
