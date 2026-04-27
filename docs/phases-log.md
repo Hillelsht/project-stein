@@ -82,9 +82,32 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 3 — Ingestion service
+## Phase 3 — Ingestion service ✅
 
-_Not yet started._
+**Goal:** `rssService` fetches all active sources and saves articles. No filtering yet.
+
+**What was built:**
+- `src/lib/services/rssService.ts`
+  - `fetchAndStoreAll()` — loops active sources, calls `fetchSource()` for each, aggregates counts
+  - `fetchSource(source)` — uses `rss-parser` with source-specific User-Agent (SEC requires `SEC_USER_AGENT` env var); handles Atom and RSS formats; returns `{ fetched, saved, errors }`
+  - `buildRawContent()` — combines `content`, `contentSnippet`, `summary`, truncated to 10,000 chars; for SEC sources prepends `[SEC_ITEMS:1.01,2.02]` prefix so filterService can find item codes
+  - `extractSecItems()` — regex `/\bitems?\s+([\d]+\.[\d]+)/gi` to pull 8-K item codes from feed text
+  - Source failures are isolated — one bad source doesn't abort the others
+- `src/app/api/cron/ingest/route.ts`
+  - `GET` handler, requires `Authorization: Bearer ${CRON_SECRET}` (401 otherwise)
+  - Returns `{ ok, total: { fetched, saved, errors }, perSource: { ... } }`
+
+**Acceptance verified (live test):**
+- First run: 109 articles saved (SEC: 40, PR Newswire: 20, Yahoo Finance: 49)
+- Second run immediately after: fetched 109, saved 1 (one new article that arrived between runs) — dedup working via `url UNIQUE` constraint
+- No errors from any source
+
+**Key decisions:**
+- `saveArticle()` silently returns `null` on duplicate URL (postgres error 23505), so the ingest loop needs no special handling
+- Parser typed as `Parser<Record<string, string>, { summary?: string }>` to satisfy rss-parser's generic constraints while still accessing the custom `summary` field
+- `updateLastPolled()` failure is caught and ignored — non-fatal; the ingest still ran
+
+**Commit:** `phase-3: rssService + /api/cron/ingest route`
 
 ---
 
