@@ -176,9 +176,38 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 6 — LLM service
+## Phase 6 — LLM service ✅
 
-_Not yet started._
+**Goal:** Passed articles get sent to Gemini, parsed, validated, saved to `ai_analyses` + `market_signals`.
+
+**What was built:**
+- `src/lib/prompts/sentimentPrompt.ts`
+  - `SYSTEM_PROMPT` — verbatim from PRD §7
+  - `REPAIR_PROMPT` — used when first JSON parse fails
+  - `buildPrompt(title, rawContent)` — strips `[SEC_ITEMS:...]` prefix before sending to LLM, truncates body to 4,000 chars
+- `src/lib/services/llmService.ts`
+  - `callGemini(prompt)` — POST to Gemini REST API (`gemini-2.5-flash-lite`), `responseMimeType: application/json`, returns null on 429/5xx (signals fallback)
+  - `callGroq(prompt)` — OpenAI-compatible Groq endpoint (`llama-3.3-70b-versatile`), `response_format: {type: "json_object"}`, returns null on 429/5xx
+  - `fetchParsedResponse(prompt)` — tries Gemini, falls back to Groq, one JSON repair attempt on parse failure
+  - `analyzeArticle(article)` — full flow: budget check → prompt → LLM → validate → save
+    - `validateTickerBatch` drops hallucinated tickers, logs them
+    - `clamp()` enforces 0–10 on sentiment_score and confidence
+    - `normaliseSentiment()` uppercases and defaults to NEUTRAL if invalid
+    - Primary ticker gets the scored sentiment; additional tickers get NEUTRAL/0 (Phase 14 refines this)
+    - Token counts stored in `cost_tokens_in/out` for daily budget monitoring
+- `src/app/api/cron/analyze/route.ts` — extended: filter pass → `markFilterPass` → `analyzeArticle`; response now includes `analyzed` count
+
+**Acceptance verified (live test on 106 fresh articles):**
+- 11 passed filter, 11 analyzed (100% LLM success rate on this run)
+- 3 market_signals created (8 articles had no valid tickers after LLM validation)
+- Token costs recorded: ~450–570 tokens in, ~97–133 tokens out per call
+- Provider mix: Gemini primary for most, Groq fallback triggered for at least 1
+- Summaries are 2 sentences, scores are calibrated (BMY: score 2 low-vol dividend; ERIC: score 0 correction notice)
+- `material=false` correctly assigned to non-price-moving articles (no signals created)
+
+**Bug caught:** provider string was `gemini-gemini-2.5-flash-lite` (doubled prefix). Fixed to just `gemini-2.5-flash-lite`.
+
+**Commit:** `phase-6: llmService (Gemini + Groq fallback) + extend analyze route`
 
 ---
 
