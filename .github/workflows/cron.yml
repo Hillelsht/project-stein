@@ -1,0 +1,69 @@
+name: Project Stein Cron
+
+on:
+  schedule:
+    # Market hours Mon-Fri 14:00-21:59 UTC, every 10 min → ingest + analyze
+    - cron: '*/10 14-21 * * 1-5'
+    # Extended / overnight, top of every hour outside market window → ingest + analyze
+    - cron: '0 0-13,22-23 * * *'
+    # Daily price validation at 02:00 UTC (Phase 8 — will 404 until built)
+    - cron: '0 2 * * *'
+    # Dedup hash cleanup at 03:00 UTC
+    - cron: '0 3 * * *'
+    # Weekly ticker master refresh, Sunday 04:00 UTC
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+
+jobs:
+  ingest-analyze:
+    name: Ingest + Analyze
+    # Runs on all schedules except the three dedicated jobs, and on manual trigger.
+    # Empty schedule string (workflow_dispatch) != any of the excluded strings → runs.
+    if: "github.event.schedule != '0 2 * * *' && github.event.schedule != '0 3 * * *' && github.event.schedule != '0 4 * * 0'"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ingest
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/ingest"
+
+      - name: Analyze
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/analyze"
+
+  validate:
+    name: Validate Signals
+    # Phase 8 builds this endpoint; job will fail with 404 until then.
+    if: github.event.schedule == '0 2 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/validate"
+
+  dedup-cleanup:
+    name: Dedup Hash Cleanup
+    if: github.event.schedule == '0 3 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/dedup-cleanup"
+
+  refresh-tickers:
+    name: Refresh Ticker Master
+    if: github.event.schedule == '0 4 * * 0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refresh
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/refresh-tickers"

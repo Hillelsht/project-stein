@@ -211,9 +211,38 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 7 — GitHub Actions cron
+## Phase 7 — GitHub Actions cron ✅
 
-_Not yet started._
+**Goal:** Scheduled runs without human intervention.
+
+**What was built:**
+- `.github/workflows/cron.yml` — 4 jobs, 5 schedules:
+
+| Schedule | Cron | Job |
+|---|---|---|
+| Market hours Mon-Fri 14:00-21:59 UTC | `*/10 14-21 * * 1-5` | ingest-analyze |
+| Extended/overnight hourly | `0 0-13,22-23 * * *` | ingest-analyze |
+| Daily 02:00 UTC | `0 2 * * *` | validate (Phase 8) |
+| Daily 03:00 UTC | `0 3 * * *` | dedup-cleanup |
+| Sunday 04:00 UTC | `0 4 * * 0` | refresh-tickers |
+
+- `workflow_dispatch` trigger for manual testing
+- `if` conditions route each schedule to exactly one job; `workflow_dispatch` runs `ingest-analyze`
+- `src/app/api/cron/dedup-cleanup/route.ts` — calls `purgeOlderThan(48)`, returns `{ ok, deleted }`
+
+**Manual steps required by user:**
+1. Go to GitHub repo → Settings → Secrets and variables → Actions
+2. Add secret `CRON_SECRET` — same value as in `.env.local`
+3. Add secret `APP_URL` — your Vercel deployment URL (e.g. `https://project-stein.vercel.app`), no trailing slash
+4. Push this commit to trigger the workflow file to appear in Actions tab
+5. Run workflow manually via Actions → "Project Stein Cron" → "Run workflow" to verify ingest-analyze works
+
+**Key decisions:**
+- `validate` job references `/api/cron/validate` which doesn't exist until Phase 8 — job will fail at 02:00 UTC until then; that's intentional (signals unfinished work)
+- Extended hours use hourly cadence (`0 0-13,22-23`) not every 10 min — news volume is low overnight and GitHub Actions minutes are finite (free tier: 2,000/month; this schedule uses ~1,500)
+- dedup-cleanup purges at 48h (matching the `hashExists` window); keeps the table small without losing any dedup protection
+
+**Commit:** `phase-7: GitHub Actions cron + dedup-cleanup route`
 
 ---
 
