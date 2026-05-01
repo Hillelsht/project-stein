@@ -42,6 +42,23 @@ export async function validateTickerBatch(symbols: string[]): Promise<string[]> 
   return (data as { ticker_symbol: string }[]).map((r) => r.ticker_symbol)
 }
 
+export async function searchTickers(
+  prefix: string,
+  limit = 10,
+): Promise<Pick<TickerRow, 'ticker_symbol' | 'company_name'>[]> {
+  if (!prefix.trim()) return []
+  const db = createServiceClient()
+  const { data, error } = await db
+    .from('tickers_master')
+    .select('ticker_symbol, company_name')
+    .ilike('ticker_symbol', `${prefix.toUpperCase()}%`)
+    .eq('active', true)
+    .order('ticker_symbol')
+    .limit(limit)
+  if (error) throw error
+  return (data ?? []) as Pick<TickerRow, 'ticker_symbol' | 'company_name'>[]
+}
+
 export async function bulkUpsertTickers(rows: Omit<TickerRow, 'created_at'>[]): Promise<void> {
   const db = createServiceClient()
   // Supabase upsert in batches of 500 to stay within request limits

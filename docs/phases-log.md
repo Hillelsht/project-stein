@@ -279,9 +279,33 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 9 — Auth + Watchlist UI
+## Phase 9 — Auth + Watchlist UI ✅
 
-_Not yet started._
+**Goal:** Family members can log in and manage their watchlist.
+
+**What was built:**
+- `src/proxy.ts` — Next.js 16 route proxy (replaces `middleware.ts` — breaking rename in v16): protects `/watchlist` (redirects to `/login`), redirects authenticated users away from `/login`
+- `src/app/(auth)/login/page.tsx` — client component: email form → `signInWithOtp({ shouldCreateUser: false })` → "check your email" state. `shouldCreateUser: false` means only pre-created users can authenticate (no open signup)
+- `src/app/auth/callback/route.ts` — handles both PKCE (`?code=`) and token-hash (`?token_hash=&type=`) flows; exchanges for session cookie; redirects to `/watchlist`
+- `src/app/watchlist/page.tsx` — server component: gets user from cookie, fetches their watchlist, renders `WatchlistManager`
+- `src/app/watchlist/WatchlistManager.tsx` — client component: autocomplete add (250ms debounce, calls `searchTickersAction`), remove buttons, error display; pressing Enter adds top suggestion
+- `src/app/watchlist/actions.ts` — server actions: `addTickerAction` (validates format → BLOCKLIST → DB lookup → insert, handles 23505 gracefully), `removeTickerAction`, `searchTickersAction`, `signOutAction` (calls `auth.signOut()` + redirects to `/login`)
+- `src/lib/repositories/tickerMasterRepo.ts` — added `searchTickers(prefix, limit)`: `ilike` prefix match on `ticker_symbol`, ordered, max 10 results
+- `src/app/layout.tsx` — updated title to "Project Stein"
+
+**Bugs fixed during implementation:**
+- Next.js 16.2.4 deprecates `middleware.ts` in favour of `proxy.ts` with `export function proxy()` — build fails with a clear error message; renamed and updated the export
+- `verifyOtp` with `token_hash` requires `EmailOtpType` (not `MobileOtpType | EmailOtpType`); fixed with explicit email-type cast
+
+**Manual steps required by user:**
+1. Go to Supabase dashboard → Authentication → Users → **Add user** for each family member (email + password — password is irrelevant, they'll use magic link)
+2. Verify that "Confirm email" is disabled under Authentication → Settings, OR that users are pre-confirmed
+
+**Acceptance:**
+- `npm run build` clean: `/login`, `/watchlist`, `/auth/callback` all listed
+- After adding family member emails in Supabase, they can: receive magic link → click → land on `/watchlist` → add/remove tickers
+
+**Commit:** `phase-9: auth + watchlist UI (proxy, login, callback, watchlist page)`
 
 ---
 
