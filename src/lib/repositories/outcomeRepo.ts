@@ -72,3 +72,19 @@ export async function getStats(days: number): Promise<SignalOutcome[]> {
   if (error) throw error
   return data as SignalOutcome[]
 }
+
+export type OutcomeWithSignal = SignalOutcome & {
+  market_signals: { sentiment: string; sentiment_score: number } | null
+}
+
+export async function getStatsWithSignals(days: number): Promise<OutcomeWithSignal[]> {
+  const db = createServiceClient()
+  const since = new Date()
+  since.setDate(since.getDate() - days)
+  const { data, error } = await db
+    .from('signal_outcomes')
+    .select('*, market_signals(sentiment, sentiment_score)')
+    .gte('created_at', since.toISOString())
+  if (error) throw error
+  return data as OutcomeWithSignal[]
+}

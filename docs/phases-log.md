@@ -246,9 +246,36 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 8 — Price validation loop
+## Phase 8 — Price validation loop ✅
 
-_Not yet started._
+**Goal:** Fill `signal_outcomes` from real price data; expose a stats endpoint.
+
+**What was built:**
+- `src/lib/services/priceService.ts`
+  - `getClosingPriceAt(ticker, targetDate)` — uses `yf.historical()`, looks up to 10 days forward to skip weekends/holidays; returns the first close on or after targetDate
+  - `getPriceAtHorizon(signal, horizon)` — ripeness check first, then for `1h` uses `yf.chart()` with hourly interval (returns null if market was closed), for `1d/3d/7d` calls `getClosingPriceAt` with `addTradingDays` offset
+  - `addTradingDays(date, n)` — Mon–Fri only, no holiday calendar
+  - `isHorizonRipe(signalTime, horizon)` — 1h: 90 min buffer; 1d/3d/7d: target trading day at 22:00 UTC
+  - **Bug fixed during implementation:** `yahoo-finance2` v2+ exports a class, not a singleton. Static methods (old API) are marked `@deprecated` and typed as returning `never`. Fix: `const yf = new YahooFinance(); yf.historical(...)` instead of `yahooFinance.historical(...)`
+- `src/lib/services/validationService.ts`
+  - `fillOutcomesForRecentSignals()` — fetches last 10 days of signals, checks existing outcomes, fills null fields that have ripened, computes `return_*` as `(horizonPrice - base) / base * 100`, upserts via `outcomeRepo`
+  - `computeStats(days)` — joins outcomes with signals via `getStatsWithSignals`, groups by (sentiment × score_bucket), returns `StatsBucket[]` with mean_return_1d, mean_return_3d, hit_rate_1d
+- `src/lib/repositories/outcomeRepo.ts` — added `OutcomeWithSignal` type and `getStatsWithSignals(days)` (Supabase embedded relation: `signal_outcomes` ← `market_signals(sentiment, sentiment_score)`)
+- `src/app/api/cron/validate/route.ts` — calls `fillOutcomesForRecentSignals()`; now activates the Phase 7 cron job that was previously 404-ing
+- `src/app/api/stats/route.ts` — calls `computeStats(days)` where `days` comes from `?days=N` query param (default 30); protected by `CRON_SECRET`
+
+**Key decisions:**
+- `price_at_signal` = closing price on or after signal.created_at date (not real-time bid/ask — we don't have a paid data feed)
+- `price_1h` uses `chart` with hourly bars; returns null if signal was generated after market close (no bar available) — null is the honest answer, not a fabricated price
+- Score buckets: 0–4, 5–7, 8–10 (matches Phase 12 stats display)
+- `getStatsWithSignals` uses Supabase PostgREST embedded relation (FK: `signal_outcomes.signal_id → market_signals.id`) — one query instead of N+1
+- `/api/stats` accepts `?days=N` so Phase 12 UI can request different windows
+
+**Acceptance:**
+- `npm run build` clean, all 7 routes listed: `/api/cron/analyze`, `/api/cron/dedup-cleanup`, `/api/cron/ingest`, `/api/cron/refresh-tickers`, `/api/cron/validate`, `/api/stats`, `/`
+- After signals are 1+ day old, running `/api/cron/validate` will fill `signal_outcomes` rows; `/api/stats` will return bucketed returns
+
+**Commit:** `phase-8: price validation loop (priceService, validationService, validate + stats routes)`
 
 ---
 
