@@ -6,6 +6,10 @@ on:
     - cron: '*/10 14-21 * * 1-5'
     # Extended / overnight, top of every hour outside market window → ingest + analyze
     - cron: '0 0-13,22-23 * * *'
+    # Weekend daytime fill — top of every hour Sat/Sun 14:00-21:00 UTC
+    # (the two schedules above cover Mon-Fri and the off-hour band; without this
+    # rule weekends had a 9-hour ingest gap that triggered false ops alarms.)
+    - cron: '0 14-21 * * 0,6'
     # Daily price validation at 02:00 UTC (Phase 8 — will 404 until built)
     - cron: '0 2 * * *'
     # Dedup hash cleanup at 03:00 UTC

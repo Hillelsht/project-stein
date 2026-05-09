@@ -497,3 +497,17 @@ _Not yet started._
 3. Inside the app: any of `/`, `/watchlist`, `/stats` will show the amber banner if `health.issues` is non-empty.
 
 **Commit:** `phase-13: ops monitoring (health endpoint, OpsBanner, opsService)`
+
+**Phase 13 follow-up — false alarm fix.**
+
+The first deploy reported `degraded` on Saturday because the staleness check used `articles.fetched_at`, which only updates when *new* articles are saved. On weekends and slow news days that metric naturally goes hours without movement even when the cron is firing fine — so it conflated cron health with news flow.
+
+We also discovered a Phase 7 schedule gap: weekends 14:00-21:00 UTC matched neither the `*/10 14-21 * * 1-5` (Mon-Fri only) nor the `0 0-13,22-23 * * *` (off-hours) schedule, leaving an 8-hour weekend daytime window with no cron at all.
+
+Two changes:
+- `cron.yml` — added `'0 14-21 * * 0,6'` to fill the weekend daytime band with hourly runs. The existing `if:` condition on the `ingest-analyze` job already routes any non-excluded schedule through it, so no job changes were needed.
+- `src/lib/repositories/sourceRepo.ts` — added `getLatestPolledAt()` (most recent `last_polled_at` across active sources). `rssService.fetchSource` was already calling `updateLastPolled` after every successful poll, so this is a true measure of "did the cron run".
+- `src/lib/services/opsService.ts` — replaced the `latest_article_fetched_at` field with `latest_source_polled_at` and renamed the threshold (`STALE_INGEST_MINUTES → STALE_POLL_MINUTES`, still 90 min). The `/api/health` JSON shape changed to match.
+- `src/lib/repositories/articleRepo.ts` — removed the now-unused `getLatestFetchedAt()` (per the no-dead-code rule).
+
+The new metric measures cron health independent of news volume, which is what we actually want to alert on.

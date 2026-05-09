@@ -21,6 +21,19 @@ export async function getActiveSources(): Promise<Source[]> {
   return data as Source[]
 }
 
+export async function getLatestPolledAt(): Promise<string | null> {
+  const db = createServiceClient()
+  const { data, error } = await db
+    .from('sources')
+    .select('last_polled_at')
+    .eq('active', true)
+    .order('last_polled_at', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw error
+  return (data?.last_polled_at as string | undefined) ?? null
+}
+
 export async function updateLastPolled(sourceId: string): Promise<void> {
   const db = createServiceClient()
   const { error } = await db
