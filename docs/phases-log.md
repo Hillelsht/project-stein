@@ -458,6 +458,42 @@ _Not yet started._
 
 ---
 
-## Phase 13 — Ops / monitoring
+## Phase 13 — Ops / monitoring ✅
 
-_Not yet started._
+**Goal:** Detect pipeline staleness without having to manually run SQL queries every time something looks off. Surface problems both as a JSON endpoint (for external uptime monitors) and as an inline banner on every authed page.
+
+**What was built:**
+
+- `src/lib/repositories/articleRepo.ts` — added `getLatestFetchedAt()` (returns `string | null`).
+- `src/lib/repositories/signalRepo.ts` — added `getLatestSignalCreatedAt()`.
+- (`countAnalysesToday` from `analysisRepo.ts` was already there from Phase 6.)
+
+- `src/lib/services/opsService.ts` — `getPipelineHealth()` aggregates the three queries above (in parallel via `Promise.all`) and applies thresholds:
+  - `STALE_INGEST_MINUTES = 90` — last article older than 90 min flags a stale-ingest issue.
+  - `QUIET_SIGNAL_HOURS = 36` — no new signal in 36 h flags a quiet-pipeline issue. Picked larger than 24 h to absorb weekends and natural news droughts without false-positives.
+  - `LLM_DAILY_BUDGET = 800` (mirrors the constant in `llmService`); warn at 80%, alarm at 100%.
+  - Returns `{ status: 'ok' | 'degraded' | 'unknown', issues: string[], ...metrics }`.
+
+- `src/app/api/health/route.ts` — public GET endpoint (no auth) returning the `PipelineHealth` JSON. HTTP status mirrors health: `200` when ok, `503` otherwise — so external monitors can alert on a non-200 without parsing the body. Errors return `503` with `{ status: 'unknown', error }`.
+
+- `src/components/OpsBanner.tsx` — async server component. Calls `getPipelineHealth()`. Renders `null` when status is `ok` (so it costs nothing on healthy days). When degraded, renders an amber banner with a bulleted list of `health.issues`. Wraps the call in try/catch so a Supabase outage never breaks page render — it just hides the banner.
+
+- Mounted `<OpsBanner />` on `src/app/page.tsx`, `src/app/watchlist/page.tsx`, and `src/app/stats/page.tsx`. All three render it above the existing main content.
+
+**Key decisions:**
+- **Public health endpoint, sensitive content stripped.** Counts and timestamps only — no signal contents, no user data. Safe to point UptimeRobot or BetterStack at without leaking anything.
+- **HTTP 503 on degraded.** Lets external monitors alert without reading the body. Simpler than rolling a custom status field for everything.
+- **Banner is server-rendered, no polling.** Each page load re-runs the health check. Cheap (3 small queries) and avoids the complexity of a client component with `setInterval`.
+- **Banner self-suppresses on errors.** If the health check itself fails (Supabase down, etc.), the banner returns `null` rather than rendering a meta-error. The page renders normally; the user notices something's off when their normal data is missing. The `/api/health` endpoint is the right place to surface a hard failure, not the in-page banner.
+- **Thresholds tuned conservatively.** 90 min for ingest staleness covers off-hours pacing (overnight cron is hourly, not every 10 min). 36 h for signal quietness covers weekends + slow news days without firing every Monday morning. Easy to tighten later when we have more data on real cadence.
+- **Repositories own all DB access** (consistent with the Phase 2 rule). `opsService` calls three repos and aggregates — never touches Supabase directly.
+
+**Acceptance verified:**
+- `npm run build` clean. Routes table now includes `/api/health` (17 routes total).
+
+**How to use after deploy:**
+1. Hit `https://project-stein.vercel.app/api/health` — should return JSON with `status: "ok"` (HTTP 200) or `status: "degraded"` (HTTP 503). No auth header needed.
+2. Optionally point an external uptime monitor at that URL on a 5-minute interval. UptimeRobot's free tier (50 monitors, 5-min checks) is enough.
+3. Inside the app: any of `/`, `/watchlist`, `/stats` will show the amber banner if `health.issues` is non-empty.
+
+**Commit:** `phase-13: ops monitoring (health endpoint, OpsBanner, opsService)`

@@ -7,6 +7,7 @@ import { signOutAction } from './watchlist/actions'
 import SignalCard from '@/components/SignalCard'
 import FeedToggle from '@/components/FeedToggle'
 import LegalFooter from '@/components/LegalFooter'
+import OpsBanner from '@/components/OpsBanner'
 
 export default async function FeedPage({
   searchParams,
@@ -57,7 +58,8 @@ export default async function FeedPage({
         </div>
       </header>
 
-      <main className="mx-auto max-w-lg px-4 py-6">
+      <main className="mx-auto max-w-lg px-4 py-6 space-y-4">
+        <OpsBanner />
         <FeedToggle view={view} />
 
         <div className="mt-6 space-y-3">

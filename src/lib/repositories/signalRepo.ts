@@ -93,6 +93,18 @@ export async function getRecentSignalsWithContext(
   return data as unknown as SignalWithContext[]
 }
 
+export async function getLatestSignalCreatedAt(): Promise<string | null> {
+  const db = createServiceClient()
+  const { data, error } = await db
+    .from('market_signals')
+    .select('created_at')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw error
+  return (data?.created_at as string | undefined) ?? null
+}
+
 export async function getSignalsNeedingOutcomes(cutoffDays: number): Promise<MarketSignal[]> {
   const db = createServiceClient()
   const cutoff = new Date()

@@ -4,6 +4,7 @@ import { createServerClient } from '@/lib/supabase/server'
 import { computeStats } from '@/lib/services/validationService'
 import { signOutAction } from '../watchlist/actions'
 import LegalFooter from '@/components/LegalFooter'
+import OpsBanner from '@/components/OpsBanner'
 
 const WINDOWS = [7, 30, 60, 90] as const
 type Window = (typeof WINDOWS)[number]
@@ -73,6 +74,9 @@ export default async function StatsPage({
       </header>
 
       <main className="mx-auto max-w-2xl px-4 py-6">
+        <div className="mb-4">
+          <OpsBanner />
+        </div>
         <div className="mb-4 flex items-baseline justify-between">
           <h1 className="text-lg font-semibold">Validation</h1>
           <div className="flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900/60 p-1 text-xs">

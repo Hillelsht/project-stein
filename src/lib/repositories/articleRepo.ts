@@ -66,6 +66,18 @@ export async function markFilterPass(articleId: string): Promise<void> {
   if (error) throw error
 }
 
+export async function getLatestFetchedAt(): Promise<string | null> {
+  const db = createServiceClient()
+  const { data, error } = await db
+    .from('articles')
+    .select('fetched_at')
+    .order('fetched_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw error
+  return (data?.fetched_at as string | undefined) ?? null
+}
+
 export async function markFilterReject(articleId: string, reason: string): Promise<void> {
   const db = createServiceClient()
   const { error } = await db

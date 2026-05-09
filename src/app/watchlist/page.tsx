@@ -4,6 +4,7 @@ import { createServerClient } from '@/lib/supabase/server'
 import { getWatchlist } from '@/lib/repositories/watchlistRepo'
 import WatchlistManager from './WatchlistManager'
 import PushToggle from '@/components/PushToggle'
+import OpsBanner from '@/components/OpsBanner'
 import { signOutAction } from './actions'
 
 export default async function WatchlistPage() {
@@ -44,6 +45,7 @@ export default async function WatchlistPage() {
 
       {/* Main */}
       <main className="mx-auto max-w-lg px-4 py-8 space-y-8">
+        <OpsBanner />
         <section>
           <h1 className="mb-6 text-lg font-semibold">My Watchlist</h1>
           <WatchlistManager entries={entries} userEmail={user.email ?? ''} />
