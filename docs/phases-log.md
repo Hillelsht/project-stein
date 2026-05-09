@@ -423,7 +423,36 @@ _Not yet started._
 
 ---
 
-## Phase 12 — Stats page
+## Phase 12 — Stats page ✅
+
+**Goal:** A `/stats` page that lets logged-in users see whether the LLM's signals actually correlate with price movement.
+
+**What was built:**
+
+- `src/app/stats/page.tsx` — async server component, auth-gated.
+  - Window selector via search param: `?days=7|30|60|90` (defaults to 30, anything else snaps to 30).
+  - Calls `computeStats(days)` directly — no HTTP round-trip through `/api/stats` (which is `CRON_SECRET`-protected anyway).
+  - Renders bucketed results in a table: rows = `(sentiment × score_bucket)`, columns = N, Mean 1d %, Mean 3d %, Hit 1d %.
+  - Sentiment cell colored (emerald/red/zinc); return cells colored by sign; missing data renders as `—`.
+  - Header row shows `{N} signals in the last {D} days · {M} have a 1-day return` so the user sees the data-density gap between fresh and ripened signals.
+  - Empty state when there are zero signals in the window.
+  - Standard nav (Feed | Watchlist | Stats | Sign out), reuses `signOutAction` and `<LegalFooter />`.
+  - Short "How to read" caption at the bottom that names the BULLISH-8-10 hit rate as the MVP success criterion (matches `docs/overview.md`).
+
+- `src/app/page.tsx`, `src/app/watchlist/page.tsx` — added a `Stats` link to both navs.
+
+**Key decisions:**
+- **Direct service call, not the API route.** The page is a server component running with the same trust as the cron route, so going through `/api/stats` would only add latency and require duplicating `CRON_SECRET`. The API route still exists for ops/external callers.
+- **Window snapping.** Accepting arbitrary `?days=N` would let users request unbounded scans of `signal_outcomes`. Restricting to `[7, 30, 60, 90]` keeps the query cheap and matches the four buttons in the UI.
+- **`tabular-nums` on numeric columns** so values line up across rows.
+- **Hit rate is raw "% positive returns"** (matches `validationService.computeStats`). The caption explains how to interpret it for BEARISH rows ("a *low* hit rate means the LLM was right") rather than rewriting the metric to be direction-aware. Refining this is Phase 14 territory.
+
+**Acceptance verified:**
+- `npm run build` clean. Route table now includes `/stats` (dynamic, server-rendered) — 16 routes total.
+
+**Not verified live:** the table has not been viewed against real data. With only 3 signals in the DB and most outcomes still un-validated, the table will likely render mostly `—` until both ingest is consistently producing signals and the validate cron has had a few cycles to populate prices.
+
+**Commit:** `phase-12: stats page (validation dashboard with window selector + bucket table)`
 
 _Not yet started._
 

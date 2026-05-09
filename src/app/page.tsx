@@ -42,6 +42,9 @@ export default async function FeedPage({
             <Link href="/watchlist" className="text-zinc-400 hover:text-white transition-colors">
               Watchlist
             </Link>
+            <Link href="/stats" className="text-zinc-400 hover:text-white transition-colors">
+              Stats
+            </Link>
             <form action={signOutAction}>
               <button
                 type="submit"

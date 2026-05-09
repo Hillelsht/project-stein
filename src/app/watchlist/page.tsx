@@ -27,6 +27,9 @@ export default async function WatchlistPage() {
             <Link href="/watchlist" className="font-semibold text-white">
               Watchlist
             </Link>
+            <Link href="/stats" className="text-zinc-400 hover:text-white transition-colors">
+              Stats
+            </Link>
             <form action={signOutAction}>
               <button
                 type="submit"
