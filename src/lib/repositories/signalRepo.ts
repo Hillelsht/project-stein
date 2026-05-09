@@ -56,6 +56,43 @@ export async function getRecentSignals(filters: SignalFilters = {}): Promise<Mar
   return data as MarketSignal[]
 }
 
+export type SignalWithContext = MarketSignal & {
+  ai_analyses: {
+    summary: string | null
+    economic_impact: string | null
+    articles: {
+      title: string
+      url: string
+      published_at: string | null
+      sources: { name: string } | null
+    } | null
+  } | null
+}
+
+export async function getRecentSignalsWithContext(
+  filters: SignalFilters = {},
+): Promise<SignalWithContext[]> {
+  const db = createServiceClient()
+  let query = db
+    .from('market_signals')
+    .select(
+      '*, ai_analyses!inner(summary, economic_impact, articles!inner(title, url, published_at, sources(name)))',
+    )
+    .order('created_at', { ascending: false })
+    .limit(filters.limit ?? 50)
+
+  if (filters.tickers && filters.tickers.length > 0) {
+    query = query.in('ticker_symbol', filters.tickers)
+  }
+  if (filters.minScore !== undefined) {
+    query = query.gte('sentiment_score', filters.minScore)
+  }
+
+  const { data, error } = await query
+  if (error) throw error
+  return data as unknown as SignalWithContext[]
+}
+
 export async function getSignalsNeedingOutcomes(cutoffDays: number): Promise<MarketSignal[]> {
   const db = createServiceClient()
   const cutoff = new Date()

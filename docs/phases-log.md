@@ -309,9 +309,49 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 10 — Signal feed UI
+## Phase 10 — Signal feed UI ✅
 
-_Not yet started._
+**Goal:** Authenticated home page (`/`) shows recent market signals, watchlist-filtered by default with an "All signals" toggle.
+
+**What was built:**
+
+- `src/lib/repositories/signalRepo.ts`
+  - Added `SignalWithContext` type — `MarketSignal` extended with embedded `ai_analyses(summary, economic_impact, articles(title, url, published_at, sources(name)))`.
+  - Added `getRecentSignalsWithContext(filters)` — uses Supabase nested embedded relations (`!inner` joins) to fetch a signal plus its analysis, article, and source in one query. Orders by `created_at DESC`, default limit 50. Reuses `SignalFilters` (`tickers`, `minScore`, `limit`).
+
+- `src/components/SignalCard.tsx`
+  - Server component. Renders ticker badge, sentiment badge (color-coded: emerald/red/zinc for BULLISH/BEARISH/NEUTRAL with score `/10`), article title (links to source URL in new tab), LLM summary, economic impact (italicized, hidden if "None"), source name + relative time.
+  - `relativeTime()` helper renders "just now", "Nm ago", "Nh ago", "Nd ago", or `toLocaleDateString()` for >7 days.
+
+- `src/components/FeedToggle.tsx`
+  - Server component. Two `<Link>` tabs: "Watchlist" → `/`, "All signals" → `/?view=all`. Active tab styled with `bg-zinc-800`.
+
+- `src/components/LegalFooter.tsx`
+  - Static disclaimer: "Project Stein is an automated news aggregator and is not licensed financial advice…"
+
+- `src/app/page.tsx` (replaced placeholder landing page)
+  - Async server component. Reads `searchParams` (Promise in Next.js 16) for `view`.
+  - Auth-gated: `createServerClient().auth.getUser()` → `redirect('/login')` if no user (page-level redirect; proxy was not modified).
+  - Fetches user's watchlist; default view filters signals to those tickers, `?view=all` shows all signals.
+  - Empty state when watchlist view + empty watchlist: prompts to add tickers or switch to "All signals".
+  - Header has nav: Feed | Watchlist | Sign out (reuses `signOutAction` from watchlist actions).
+  - Renders `<FeedToggle>`, signal cards, then `<LegalFooter>`.
+
+- `src/app/watchlist/page.tsx`
+  - Added matching nav (Feed | Watchlist | Sign out) for symmetry. Removed the user-email span from the header (was unused information for a 5-user app).
+
+**Key decisions:**
+- Auth protection is at the page level (`redirect('/login')` in server component) rather than in the proxy. The proxy still only protects `/watchlist` explicitly. This avoids the risk of accidentally locking out `/login` or `/auth/callback` when extending the proxy matcher.
+- View state is encoded in the URL (`?view=all`) rather than client state — keeps the page a server component, makes the toggle shareable/bookmarkable, and means no client JS for the feed itself.
+- Used Supabase `!inner` joins so signals without an article/analysis are filtered out at the DB level (defensive — should not happen given FK constraints).
+- Default limit is 50 signals. No pagination yet — at the current ingest volume this is well under one screen of scroll for a heavy day.
+- Post-login destination remains `/watchlist` (set by the proxy in Phase 9). For new users with empty watchlists this is more useful than landing on an empty feed.
+
+**Acceptance verified:**
+- `npm run build` clean — 11 routes including `/` (dynamic, server-rendered).
+- TypeScript clean across the new repo function and components.
+
+**Commit:** `phase-10: signal feed UI (page, SignalCard, FeedToggle, LegalFooter, joined repo query)`
 
 ---
 

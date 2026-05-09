@@ -1,3 +1,4 @@
+import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { createServerClient } from '@/lib/supabase/server'
 import { getWatchlist } from '@/lib/repositories/watchlistRepo'
@@ -18,17 +19,22 @@ export default async function WatchlistPage() {
       <header className="border-b border-zinc-800 bg-zinc-950 px-4 py-3">
         <div className="mx-auto flex max-w-lg items-center justify-between">
           <span className="text-sm font-semibold tracking-tight">Project Stein</span>
-          <div className="flex items-center gap-4">
-            <span className="hidden text-xs text-zinc-500 sm:block">{user.email}</span>
+          <nav className="flex items-center gap-4 text-xs">
+            <Link href="/" className="text-zinc-400 hover:text-white transition-colors">
+              Feed
+            </Link>
+            <Link href="/watchlist" className="font-semibold text-white">
+              Watchlist
+            </Link>
             <form action={signOutAction}>
               <button
                 type="submit"
-                className="text-xs text-zinc-400 hover:text-white transition-colors"
+                className="text-zinc-400 hover:text-white transition-colors"
               >
                 Sign out
               </button>
             </form>
-          </div>
+          </nav>
         </div>
       </header>
 
