@@ -110,8 +110,10 @@ export async function fetchAndStoreAll(): Promise<IngestSummary> {
 
     try {
       await updateLastPolled(source.id)
-    } catch {
-      // Non-fatal — just means last_polled_at won't update this run
+    } catch (err) {
+      // Non-fatal — just means last_polled_at won't update this run.
+      // Log it so the ops banner / Vercel logs surface a recurring failure.
+      console.warn(`[rss] updateLastPolled failed for ${source.name}:`, (err as Error).message)
     }
   }
 
