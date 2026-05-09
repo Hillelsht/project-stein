@@ -13,8 +13,10 @@ function pct(horizonPrice: number, base: number): number {
   return ((horizonPrice - base) / base) * 100
 }
 
+// 30-day window: long enough for the longest horizon (7d) to ripen with margin,
+// and forgiving if the analyze pipeline pauses for a week or two.
 export async function fillOutcomesForRecentSignals(): Promise<{ processed: number; updated: number }> {
-  const signals = await getSignalsNeedingOutcomes(10)
+  const signals = await getSignalsNeedingOutcomes(30)
   let processed = 0
   let updated = 0
 
