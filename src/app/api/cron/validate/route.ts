@@ -10,8 +10,11 @@ export async function GET(request: NextRequest) {
     const result = await fillOutcomesForRecentSignals()
     return NextResponse.json({ ok: true, ...result })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.error('[validate] fatal:', message)
+    const message =
+      err instanceof Error ? err.message :
+      typeof err === 'object' && err !== null ? JSON.stringify(err) :
+      String(err)
+    console.error('[validate] fatal:', message, err)
     return NextResponse.json({ ok: false, error: message }, { status: 500 })
   }
 }
