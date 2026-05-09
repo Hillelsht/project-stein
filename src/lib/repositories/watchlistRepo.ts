@@ -39,6 +39,17 @@ export async function removeTicker(userId: string, tickerSymbol: string): Promis
   if (error) throw error
 }
 
+// Returns the user IDs of every user watching a given ticker.
+export async function getUsersWatchingTicker(tickerSymbol: string): Promise<string[]> {
+  const db = createServiceClient()
+  const { data, error } = await db
+    .from('watchlist')
+    .select('user_id')
+    .eq('ticker_symbol', tickerSymbol.toUpperCase())
+  if (error) throw error
+  return [...new Set((data as { user_id: string }[]).map((r) => r.user_id))]
+}
+
 // Returns every ticker symbol watched by any user — used by filterService to
 // prioritize articles before the LLM budget check.
 export async function getAllWatchlistTickers(): Promise<string[]> {

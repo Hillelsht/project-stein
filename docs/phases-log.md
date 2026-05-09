@@ -355,7 +355,69 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 ---
 
-## Phase 11 — PWA + Push notifications
+## Phase 11 — PWA + Push notifications ✅
+
+**Goal:** Logged-in users can install Project Stein as a PWA and receive a Web Push when a watchlist ticker generates a signal of score ≥ 8.
+
+**What was built:**
+
+- `supabase/migrations/0002_push_history.sql` — new `push_history` table tracking every push sent. Two indexes: `(user_id, sent_at DESC)` for daily-cap counts, `(user_id, ticker_symbol, sent_at DESC)` for per-ticker dedup. RLS lets a user select only their own rows; writes only via service role from the cron.
+
+- `src/lib/repositories/pushHistoryRepo.ts` — `recordPushSent`, `countSentToday(userId)`, `wasTickerPushedRecently(userId, ticker, withinMinutes)`.
+
+- `src/lib/repositories/watchlistRepo.ts` — added `getUsersWatchingTicker(tickerSymbol)` so the push trigger can find which users (if any) watch a freshly-scored ticker.
+
+- `src/lib/services/pushService.ts` — `notifyForSignal(signal, summary)`. Implements the trigger spec from `docs/pipeline.md`:
+  - Bails if `sentiment_score < 8`.
+  - Bails if VAPID env vars are missing (warn-and-skip, never throws).
+  - Loads watchers via `getUsersWatchingTicker`.
+  - Per-user gate: skip if pushed same ticker within 30 min, or already received 10 pushes today.
+  - Loads each user's subscriptions and calls `webpush.sendNotification`. On 404/410 the subscription is treated as expired and deleted from the DB.
+  - On any successful delivery, records a `push_history` row for that user/ticker/signal.
+  - Payload: `{ title: "TSLA · BULLISH · 9/10", body: <summary, 200-char cap>, url: "/?highlight=<signal_id>", tag: <ticker> }`. The `tag` collapses repeated alerts for the same ticker into one OS notification.
+
+- `src/lib/services/llmService.ts` — `analyzeArticle()` now captures the saved signal from `saveSignal` and calls `notifyForSignal` on it inside a try/catch (push is a side effect; failures are logged but never abort the pipeline).
+
+- `src/app/api/push/subscribe/route.ts` (POST) — validates auth, parses `{ endpoint, keys: { p256dh, auth } }`, upserts via `pushRepo.saveSubscription`. Returns 401 if not logged in, 400 on malformed body.
+
+- `src/app/api/push/unsubscribe/route.ts` (POST) — validates auth, deletes by endpoint via `pushRepo.deleteSubscription`.
+
+- `src/components/PushToggle.tsx` — client component used on the watchlist page. State machine: `unsupported | denied | unavailable | idle | busy | subscribed`. Registers `/sw.js` on mount, requests `Notification.permission`, calls `pushManager.subscribe({ userVisibleOnly: true, applicationServerKey })`, POSTs the subscription JSON to `/api/push/subscribe`. The Disable button calls the inverse path. Shows tailored copy for the iOS Add-to-Home-Screen requirement.
+
+- `public/manifest.json` — PWA manifest (standalone display, dark background, references `/icon.svg`).
+- `public/icon.svg` — minimal app icon (dark rounded square with indigo `$` glyph). Used by manifest, apple-touch-icon, and the service-worker notification.
+- `public/sw.js` — service worker. Skips waiting/claims clients on install/activate. `push` event reads `event.data.json()` (falls back to text), shows a notification with title/body/icon/tag. `notificationclick` focuses an existing window and navigates it to `payload.url`, or opens a new one.
+
+- `src/app/layout.tsx` — added `manifest`, `appleWebApp`, and `icons` to the `metadata` export, and a separate `viewport` export with `themeColor: "#09090b"` (Next.js 16 requires `themeColor` to live in `viewport`, not `metadata`).
+
+- `src/app/watchlist/page.tsx` — added a "Notifications" section under the watchlist with `<PushToggle />`.
+
+**Manual steps the user must perform once before push works in production:**
+1. Run `npx web-push generate-vapid-keys` locally to get a VAPID keypair.
+2. Add three env vars to Vercel + `.env.local`:
+   - `NEXT_PUBLIC_VAPID_PUBLIC_KEY`
+   - `VAPID_PRIVATE_KEY`
+   - `VAPID_SUBJECT=mailto:hishtein@gmail.com`
+3. Apply the migration `0002_push_history.sql` in Supabase SQL editor.
+4. After deploy, open the site, go to `/watchlist`, click **Enable push notifications**, accept the browser prompt.
+5. **iOS only**: Add the site to the Home Screen first (Safari → Share → Add to Home Screen, iOS 16.4+), then open the installed PWA before clicking Enable.
+
+**Key decisions:**
+- **`push_history` table over in-memory rate limiting.** Vercel serverless functions are stateless across invocations; only DB-backed counters work.
+- **Score threshold 8, daily cap 10, ticker dedup 30 min** — per `docs/pipeline.md` spec. Encoded as constants at the top of `pushService.ts` so they're easy to find/tune.
+- **Push hooked into `llmService.analyzeArticle`, not the analyze route.** The signal is created inside the LLM service so the push needs to fire there. The route layer stays a thin transport.
+- **Push errors are swallowed** (logged, not thrown). The analyze pipeline must keep processing other articles even if one user's subscription is broken.
+- **Expired subscriptions auto-purge** (404/410 → `deleteSubscription`). Avoids accumulating dead endpoints from uninstalled PWAs.
+- **VAPID keys loaded lazily** (`configureVapid()` runs on first send). If the keys aren't set, `notifyForSignal` warns and returns; the rest of the pipeline is unaffected. This means push silently does nothing in any environment that hasn't completed the manual VAPID setup — including local dev.
+- **SVG icon** in manifest. Chrome accepts it for installable PWAs. iOS Add-to-Home-Screen prefers PNG, but the SVG works as a fallback while we don't have proper PNG assets generated.
+
+**Acceptance verified:**
+- `npm run build` clean. Routes table includes `/api/push/subscribe` and `/api/push/unsubscribe`. Existing routes still build.
+- TypeScript: had to switch the VAPID-key helper return type to `Uint8Array<ArrayBuffer>` (constructed explicitly via `new ArrayBuffer(len)`) to satisfy Next.js's stricter `pushManager.subscribe` signature, which rejects `SharedArrayBuffer`-backed views.
+
+**Not verified live:** End-to-end push delivery requires the manual steps above. The first real test will be when a watchlist ticker scores 8+ — this may take days depending on news flow.
+
+**Commit:** `phase-11: PWA + Web Push (manifest, sw, pushService, push_history, subscribe/unsubscribe routes, PushToggle)`
 
 _Not yet started._
 

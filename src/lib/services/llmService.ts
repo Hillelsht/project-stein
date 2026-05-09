@@ -2,6 +2,7 @@ import { buildPrompt, REPAIR_PROMPT } from '@/lib/prompts/sentimentPrompt'
 import { validateTickerBatch } from '@/lib/repositories/tickerMasterRepo'
 import { countAnalysesToday, saveAnalysis } from '@/lib/repositories/analysisRepo'
 import { saveSignal } from '@/lib/repositories/signalRepo'
+import { notifyForSignal } from '@/lib/services/pushService'
 import type { Article } from '@/lib/repositories/articleRepo'
 import type { Sentiment } from '@/lib/repositories/signalRepo'
 
@@ -216,12 +217,18 @@ export async function analyzeArticle(article: Article): Promise<void> {
   // multi-ticker articles get a single sentiment — Phase 14 can refine this)
   if (validTickers.length > 0 || material) {
     for (let i = 0; i < validTickers.length; i++) {
-      await saveSignal({
+      const saved = await saveSignal({
         analysis_id:     analysis.id,
         ticker_symbol:   validTickers[i],
         sentiment:       i === 0 ? sentiment : 'NEUTRAL',
         sentiment_score: i === 0 ? sentimentScore : 0,
       })
+      // Push is a side effect — never let it fail the pipeline
+      try {
+        await notifyForSignal(saved, summary)
+      } catch (err) {
+        console.warn('[push] notifyForSignal failed:', (err as Error).message)
+      }
     }
   }
 
