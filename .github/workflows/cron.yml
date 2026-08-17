@@ -19,6 +19,8 @@ on:
     # Portfolio sync ahead of each brief, weekdays (Stein 2.0)
     - cron: '30 10 * * 1-5'
     - cron: '0 21 * * 1-5'
+    # Nightly recommendation scoring, Tue-Sat 02:00 UTC (after each weekday close)
+    - cron: '0 2 * * 2-6'
   workflow_dispatch:
 
 jobs:
@@ -28,7 +30,7 @@ jobs:
     # Empty schedule string (workflow_dispatch) != any of the excluded strings → runs.
     # NOTE: this string-comparison routing is replaced by a single case-routed
     # job in Phase 23; new schedules must be excluded here until then.
-    if: "github.event.schedule != '0 2 * * *' && github.event.schedule != '0 3 * * *' && github.event.schedule != '0 4 * * 0' && github.event.schedule != '30 10 * * 1-5' && github.event.schedule != '0 21 * * 1-5'"
+    if: "github.event.schedule != '0 2 * * *' && github.event.schedule != '0 3 * * *' && github.event.schedule != '0 4 * * 0' && github.event.schedule != '30 10 * * 1-5' && github.event.schedule != '0 21 * * 1-5' && github.event.schedule != '0 2 * * 2-6'"
     runs-on: ubuntu-latest
     steps:
       - name: Ingest
@@ -53,6 +55,17 @@ jobs:
           curl -fsS \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "${{ secrets.APP_URL }}/api/cron/sync-positions"
+
+  score:
+    name: Score Recommendations
+    if: github.event.schedule == '0 2 * * 2-6'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Score
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/score"
 
   validate:
     name: Validate Signals

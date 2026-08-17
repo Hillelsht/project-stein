@@ -952,3 +952,61 @@ thing he has to remember to open.
 
 **Not verified live:** actual delivery needs `RESEND_API_KEY` and a registered
 push subscription. After deploy, trigger a brief and check the Resend dashboard.
+
+---
+
+## Phase 20 — Recommendation scoring + scoreboard ✅
+
+**Goal:** Every recommendation gets priced, judged, and closed automatically —
+so the owner can answer "does this thing actually work?" with a number.
+
+**What was built:**
+
+- `src/lib/services/scoringService.ts`:
+  - `directionalReturn(entry, current, direction)` — sign-flipped for SHORT.
+  - `isInvalidated(rec, close)` / `isPastHorizon(rec, now)`.
+  - `scoreOpenRecommendations()` — prices every OPEN row against its entry and
+    against SPY, auto-closes on invalidation or horizon.
+  - `computeScoreboard(sinceDays)` — overall, by direction, by conviction, plus
+    the recent history rows.
+- `src/app/api/cron/score/route.ts` — `maxDuration = 60`, CRON_SECRET.
+- `.github/workflows/cron.yml` — `0 2 * * 2-6` (02:00 UTC Tue–Sat, i.e. after
+  each weekday US close) routed to a `score` job.
+
+**Key decisions:**
+
+- **Alpha vs SPY is the headline metric, not hit rate.** A hit rate alone is
+  flattering and nearly meaningless in a rising market — a system can be right
+  two times out of three and still leave the owner worse off than buying the
+  index. Every closed recommendation stores the benchmark's return over the same
+  holding period, and the scoreboard reports the difference.
+- **Open recommendations never count toward hit rate.** Only rows with a
+  terminal status are scored. Otherwise an unrealized winner would inflate the
+  record indefinitely while losers quietly closed — the classic way a track
+  record lies.
+- **Close-based invalidation, not intraday.** Free EOD data has no reliable
+  intraday series, and closing a trade on a wick that fully recovered would
+  record exits the owner would never have taken. The tradeoff is documented: a
+  spike straight through the stop and back is not counted as a stop-out.
+- **A missing price skips the row rather than closing it.** If Yahoo returns
+  nothing for a ticker, the recommendation is left untouched — a data outage
+  must never auto-close a trade or freeze a stale return as its final result.
+- **One fetch per distinct ticker**, not per recommendation, and
+  `getOpenRecommendations()` is status-indexed. 1.0's validate job re-walked
+  every signal in a 30-day window every night.
+
+**Acceptance verified (unit-level, no network needed):**
+- Directional returns: LONG 100→110 = +10, LONG 100→90 = −10, **SHORT 100→90 =
+  +10** (profits on a fall), SHORT 100→110 = −10, null entry → null.
+- Invalidation: LONG stop 90 → false at 95, **true at exactly 90**, true at 85;
+  SHORT stop 110 → false at 105, true at 115.
+- Horizon: false the day before, true on the horizon date and after.
+- Scoreboard over 4 recommendations (3 closed, 1 open): hit rate **66.7%**
+  (the open +20% correctly excluded), avg return **+1.0%**, avg alpha
+  **−1.67%**. That divergence is the point — the system won two of three and
+  still trailed SPY, which is exactly what the scoreboard exists to surface.
+
+**Not verified live:** needs real open recommendations and Yahoo access. After
+deploy, insert a synthetic OPEN row with a tight invalidation, run
+`curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/score"`,
+confirm it transitions to `CLOSED_INVALIDATED`, then delete the row.
