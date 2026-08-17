@@ -4,6 +4,7 @@ import {
   createBrief,
   getBrief,
   getBriefById,
+  getStalePendingBriefs,
   updateBrief,
   type Brief,
   type BriefContent,
@@ -22,6 +23,7 @@ import { getSetting } from '@/lib/repositories/settingsRepo'
 import { getRecommendationsForBrief } from '@/lib/repositories/recommendationRepo'
 import { briefSubject, renderBriefHtml } from '@/lib/briefHtml'
 import { buildContextPack, toCompactPack, type ContextPack } from '@/lib/services/contextPackService'
+import { dispatchBriefWorker } from '@/lib/services/dispatchService'
 import { EmailNotConfiguredError, getRecipient, sendEmail } from '@/lib/services/emailService'
 import { callModelForJson } from '@/lib/services/llmClient'
 import { sendPushToAllSubscriptions } from '@/lib/services/pushService'
@@ -476,6 +478,21 @@ export async function generateBrief(args: {
   const modelId = args.modelId ?? (await resolveDefaultModelId())
   const requested = getModelOrDefault(modelId)
 
+  // A subscription-backed model can't run inside this request. Hand it to the
+  // GitHub Actions worker; the stale-pending sweep below is the safety net if
+  // the worker never reports back.
+  if (requested.runner === 'actions') {
+    try {
+      const { briefId } = await dispatchBriefWorker(requested, briefType)
+      return { ok: true, brief_id: briefId, status: 'PENDING', model: requested.id }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[brief] dispatch failed (${message}) — falling back to inline models`)
+      // Fall through and generate with the vercel chain rather than
+      // leaving the owner with no brief at all.
+    }
+  }
+
   const brief =
     existing ??
     (await createBrief({
@@ -545,6 +562,37 @@ export async function generateBrief(args: {
     console.error('[brief] generation failed:', message)
     return { ok: false, brief_id: brief.id, status: 'FAILED', error: message }
   }
+}
+
+const STALE_PENDING_MINUTES = 30
+
+/**
+ * Rescues briefs stuck in PENDING — the Actions worker died, the runner queue
+ * stalled, or the dispatch never landed. Regenerates them with the inline model
+ * chain so a scheduled slot always ends with a brief the owner can read.
+ *
+ * Called from the retry cron firing, which is why the schedule fires twice.
+ */
+export async function healStalePendingBriefs(): Promise<number> {
+  const cutoff = new Date(Date.now() - STALE_PENDING_MINUTES * 60_000).toISOString()
+  const stale = await getStalePendingBriefs(cutoff)
+  if (stale.length === 0) return 0
+
+  let healed = 0
+  for (const brief of stale) {
+    console.warn(
+      `[brief] ${brief.id.slice(0, 8)} stuck PENDING since ${brief.created_at} — regenerating inline`
+    )
+    // force: the row exists and is PENDING, so the idempotency check must not
+    // short-circuit it.
+    const result = await generateBrief({
+      briefType: brief.brief_type,
+      modelId: DEFAULT_MODEL_ID,
+      force: true,
+    })
+    if (result.ok) healed++
+  }
+  return healed
 }
 
 /** Re-runs validation + persistence for output produced elsewhere (the Claude worker). */

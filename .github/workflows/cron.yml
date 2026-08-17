@@ -21,6 +21,13 @@ on:
     - cron: '0 21 * * 1-5'
     # Nightly recommendation scoring, Tue-Sat 02:00 UTC (after each weekday close)
     - cron: '0 2 * * 2-6'
+    # Briefs: pre-market 11:00 UTC (07:00 EDT), evening 21:30 UTC (17:30 EDT).
+    # Each fires twice — the second pass retries a failure and rescues any brief
+    # the Actions worker left stranded in PENDING.
+    - cron: '0 11 * * 1-5'
+    - cron: '45 11 * * 1-5'
+    - cron: '30 21 * * 1-5'
+    - cron: '15 22 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -30,7 +37,7 @@ jobs:
     # Empty schedule string (workflow_dispatch) != any of the excluded strings → runs.
     # NOTE: this string-comparison routing is replaced by a single case-routed
     # job in Phase 23; new schedules must be excluded here until then.
-    if: "github.event.schedule != '0 2 * * *' && github.event.schedule != '0 3 * * *' && github.event.schedule != '0 4 * * 0' && github.event.schedule != '30 10 * * 1-5' && github.event.schedule != '0 21 * * 1-5' && github.event.schedule != '0 2 * * 2-6'"
+    if: "!contains(fromJSON('[\"0 2 * * *\",\"0 3 * * *\",\"0 4 * * 0\",\"30 10 * * 1-5\",\"0 21 * * 1-5\",\"0 2 * * 2-6\",\"0 11 * * 1-5\",\"45 11 * * 1-5\",\"30 21 * * 1-5\",\"15 22 * * 1-5\"]'), github.event.schedule)"
     runs-on: ubuntu-latest
     steps:
       - name: Ingest
@@ -55,6 +62,28 @@ jobs:
           curl -fsS \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "${{ secrets.APP_URL }}/api/cron/sync-positions"
+
+  brief:
+    name: Generate Brief
+    if: "contains(fromJSON('[\"0 11 * * 1-5\",\"45 11 * * 1-5\",\"30 21 * * 1-5\",\"15 22 * * 1-5\"]'), github.event.schedule)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Brief
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          # First firing generates; the later one retries and heals stranded briefs.
+          case "$SCHEDULE" in
+            '0 11 * * 1-5')  QS='type=premarket' ;;
+            '45 11 * * 1-5') QS='type=premarket&heal=1' ;;
+            '30 21 * * 1-5') QS='type=evening' ;;
+            '15 22 * * 1-5') QS='type=evening&heal=1' ;;
+            *) echo "Unmapped schedule: $SCHEDULE" >&2; exit 1 ;;
+          esac
+          curl -fsS --retry 2 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/brief?${QS}"
 
   score:
     name: Score Recommendations

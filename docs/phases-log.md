@@ -1072,3 +1072,72 @@ prop**, dead since Phase 10.
   email+password form (no magic-link copy); `/` unauthenticated returns 307 to
   `/login`; `/watchlist` and `/stats` return 307 rather than 404.
 - Screenshotted `/login` — renders correctly in Geist, confirming the font fix.
+
+---
+
+## Phase 22 — Claude-on-subscription brief worker ✅
+
+**Goal:** Write briefs with a frontier model at no marginal cost, using the
+owner's existing Claude Pro/Max subscription.
+
+**The problem this solves:** a consumer Claude subscription is not an API key, so
+it cannot be called from a Vercel function. But `claude setup-token` is the
+supported way to run Claude Code headlessly in CI, and Stein's cron already lives
+in GitHub Actions — so the subscription is reachable from there.
+
+**What was built:**
+
+- `.github/workflows/brief-worker.yml` — `workflow_dispatch` taking
+  `{brief_id, model}`. Installs Claude Code, fetches the finished prompt from the
+  app, runs `claude -p --model <id> --output-format text`, POSTs the output back.
+  `if: always()` on the final step so a Claude failure still reports rather than
+  leaving the brief PENDING.
+- `src/app/api/cron/brief-pack/route.ts` — hands the worker the prompt built from
+  the brief's stored context pack. The worker never touches the database.
+- `src/app/api/cron/brief-result/route.ts` — feeds the worker's raw output into
+  `completeBriefFromRawOutput`, i.e. **exactly the same validation, ledger, and
+  delivery path as an in-app generation**. The worker is a transport, not a
+  second implementation.
+- `src/lib/services/briefService.ts` — `generateBrief` now dispatches when the
+  chosen model is an `actions` runner; added `healStalePendingBriefs()`.
+- `.github/workflows/cron.yml` — brief schedules `0 11` / `45 11` and
+  `30 21` / `15 22` (weekdays), routed by a `case` on the schedule string.
+
+**Key decisions:**
+
+- **The pack is built in the app, not the worker.** The worker has no Supabase
+  credentials, and storing the pack before dispatch means the result route can
+  validate the model's output against exactly the input it was given.
+- **Three layers of fallback, so a brief always exists:**
+  1. Dispatch fails outright → fall through to the inline Gemini chain immediately.
+  2. The worker runs but Claude fails → it POSTs `{error}` and the brief is
+     marked FAILED rather than hanging.
+  3. The worker never reports at all → `healStalePendingBriefs()` finds anything
+     PENDING for more than 30 minutes on the retry firing and regenerates it inline.
+- **The prompt goes to a file, not an argv string or env var.** It embeds the
+  whole context pack and would blow past shell argument limits.
+- **Each brief slot fires twice** (`0 11` + `45 11`). The second pass carries
+  `heal=1`, so one schedule entry covers retry *and* rescue.
+- **Honest limits, recorded:** subscription usage is shared with the owner's own
+  Claude usage — 2–4 briefs/day is negligible, but it is not free capacity. If the
+  token is ever revoked, the registry simply loses its `actions` entries and the
+  Gemini path is unaffected. An `ANTHROPIC_API_KEY` would make Claude instant on
+  Vercel for cents per brief; deliberately not enabled, to honor the $0 constraint.
+
+**Manual steps required by the owner:**
+1. Run `claude setup-token` locally → add the value as the `CLAUDE_CODE_OAUTH_TOKEN`
+   GitHub Actions secret.
+2. Create a fine-grained GitHub PAT scoped to this repo with **Actions: write** →
+   add as `GITHUB_DISPATCH_TOKEN` in Vercel, along with `GITHUB_REPO=owner/repo`.
+
+**Acceptance verified:**
+- `npm run build` + `tsc --noEmit` clean; both new routes in the table.
+- Both workflow files parse as valid YAML.
+- **Schedule routing checked exhaustively:** a script parsed `cron.yml` and
+  matched all **13** schedules against every job's `if:` condition — each routes
+  to **exactly one** job, with zero orphaned and zero double-routed entries. This
+  is the class of bug that left 1.0 with an 8-hour weekend gap.
+
+**Not verified live:** needs the owner's `CLAUDE_CODE_OAUTH_TOKEN` and
+`GITHUB_DISPATCH_TOKEN`. After setup: press Run now with a Claude model, watch
+the run appear in the Actions tab, and confirm the brief flips to GENERATED.

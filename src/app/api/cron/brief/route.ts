@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { buildContextPack, toCompactPack } from '@/lib/services/contextPackService'
-import { generateBrief } from '@/lib/services/briefService'
+import { generateBrief, healStalePendingBriefs } from '@/lib/services/briefService'
 import type { BriefType } from '@/lib/repositories/briefRepo'
 
 // Pack assembly makes many paced market-data calls; generation adds a large
@@ -39,13 +39,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ ok: true, dry_run: true, pack: out })
     }
 
+    // The retry firing also rescues anything the Actions worker left stranded.
+    const healed = params.get('heal') === '1' ? await healStalePendingBriefs() : 0
+
     const result = await generateBrief({
       briefType,
       modelId: params.get('model'),
       force: params.get('force') === '1',
     })
 
-    return NextResponse.json(result, { status: result.ok ? 200 : 500 })
+    return NextResponse.json({ ...result, healed }, { status: result.ok ? 200 : 500 })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error('[brief] fatal:', message)

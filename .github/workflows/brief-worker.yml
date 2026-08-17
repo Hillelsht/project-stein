@@ -1,0 +1,93 @@
+name: Brief Worker (Claude)
+
+# Writes a brief using Claude Code running headlessly on the owner's Pro/Max
+# subscription. This exists because a consumer subscription is not an API key
+# and cannot be called from a serverless function — but `claude setup-token`
+# is the supported way to run Claude Code in CI, and Stein's cron already
+# lives in GitHub Actions.
+#
+# Dispatched by the app (Run Now, or a scheduled brief whose default model is
+# a Claude one). Flow: fetch prompt -> run claude -p -> POST result back.
+
+on:
+  workflow_dispatch:
+    inputs:
+      brief_id:
+        description: The briefs row to fill in
+        required: true
+        type: string
+      model:
+        description: Claude model id (e.g. claude-opus-5)
+        required: false
+        default: claude-opus-5
+        type: string
+
+jobs:
+  write-brief:
+    name: Write brief
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Fetch prompt
+        id: pack
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          BRIEF_ID: ${{ inputs.brief_id }}
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 2 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${APP_URL}/api/cron/brief-pack?brief_id=${BRIEF_ID}" \
+            -o pack.json
+          # The prompt embeds the whole context pack, so it goes to a file
+          # rather than an env var or an argv string.
+          node -e "require('fs').writeFileSync('prompt.txt', JSON.parse(require('fs').readFileSync('pack.json','utf8')).prompt)"
+          echo "bytes=$(wc -c < prompt.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude
+        id: claude
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -uo pipefail
+          # Headless, no tools — this is a single analysis turn, not an agent.
+          if claude -p --model "$MODEL" --output-format text < prompt.txt > output.txt 2> claude.err; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "Claude run failed:"
+            tail -20 claude.err || true
+          fi
+
+      - name: Post result
+        if: always()
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          BRIEF_ID: ${{ inputs.brief_id }}
+          MODEL: ${{ inputs.model }}
+          OK: ${{ steps.claude.outputs.ok }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const ok = process.env.OK === "true";
+            const body = { brief_id: process.env.BRIEF_ID, model: process.env.MODEL };
+            if (ok && fs.existsSync("output.txt")) {
+              body.output = fs.readFileSync("output.txt", "utf8");
+            } else {
+              const err = fs.existsSync("claude.err") ? fs.readFileSync("claude.err", "utf8") : "";
+              body.error = ("Claude worker failed. " + err).slice(0, 500);
+            }
+            fs.writeFileSync("result.json", JSON.stringify(body));
+          '
+          curl -fsS --retry 2 -X POST \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data @result.json \
+            "${APP_URL}/api/cron/brief-result"
