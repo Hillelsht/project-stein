@@ -584,3 +584,67 @@ protect every page in exactly one place.
 
 **Not verified live:** actual sign-in requires the password to be set in the
 Supabase dashboard first (manual step above).
+
+---
+
+## Phase 15 — Schema: positions, briefs, recommendations, settings ✅
+
+**Goal:** Every 2.0 table exists. The 1.0 pipeline keeps running untouched.
+
+**What was built:**
+
+- `supabase/migrations/0004_stein2_schema.sql` — four tables, four enums, RLS.
+
+| Table | Purpose |
+|---|---|
+| `positions` | The portfolio the briefs reason over |
+| `briefs` | One row per generated (or attempted) brief |
+| `recommendations` | The accountability ledger — one row per trade idea |
+| `settings` | Key/value owner preferences (e.g. `default_brief_model`) |
+
+- `.env.example` — added the 2.0 block: `IBKR_FLEX_TOKEN`, `IBKR_FLEX_QUERY_ID`,
+  `RESEND_API_KEY`, `BRIEF_RECIPIENT_EMAIL`, `BRIEF_FROM_EMAIL`,
+  `GITHUB_DISPATCH_TOKEN`, `GITHUB_REPO`.
+- `docs/data-model.md` — documented the new tables and **fixed the long-standing
+  count error**: the doc claimed "9 tables" while the DB had 10 (`push_history`
+  from `0002` was never documented). Now 14, with the migration list and the
+  frozen-table note spelled out.
+
+**Key decisions:**
+
+- **`recommendations` carries its own outcome columns; no `recommendation_outcomes`
+  table.** 1.0's `signal_outcomes` existed because each signal fanned out into
+  four horizons (1h/1d/3d/7d). A recommendation has exactly one lifecycle: the
+  nightly job overwrites `current_*` while OPEN and stamps `closed_*` once. A
+  join table would add nothing and make the scoreboard a two-table query.
+- **Per-holding reviews live in `briefs.content`, not a table.** HOLD/TRIM/ADD/
+  WATCH lines are commentary about existing positions, not new bets — they have
+  no entry price, no invalidation, and nothing to score. Only new trade ideas
+  enter the ledger, which keeps the scoreboard honest: it measures what the
+  model actually proposed, not how often it said "hold".
+- **Partial unique index on `briefs`** — `(brief_date, brief_type) WHERE
+  brief_type IN ('PREMARKET','EVENING')`. This is the idempotency key that lets
+  the brief cron fire twice per slot (on time + retry) without duplicating a
+  row, while leaving `ON_DEMAND` runs unconstrained so the Run Now button can be
+  pressed repeatedly.
+- **`PENDING` status from day one.** The Claude-on-subscription path (Phase 22)
+  is asynchronous: the app creates the row, a GitHub Actions worker fills it in.
+  Adding the state now avoids a status migration later.
+- **`invalidation_price` is NOT NULL.** An idea without a stop cannot be scored
+  or auto-closed, so the schema refuses to store one. `briefService` drops ideas
+  whose invalidation is on the wrong side of the entry zone rather than
+  persisting an unfalsifiable call.
+- **`positions.broker` + `source`.** `broker` makes a second brokerage a new sync
+  adapter rather than a schema change. `source` separates synced rows (safe to
+  replace wholesale on each sync) from hand-entered rows (never touched).
+- **Enums over CHECK constraints** for the status/direction/type columns, matching
+  the 1.0 `sentiment_enum` convention.
+
+**Manual step required by the owner:**
+Run `supabase/migrations/0004_stein2_schema.sql` in the Supabase SQL editor
+(the established convention — there is no Supabase CLI link for this project).
+
+**Acceptance:** after applying the migration, `select * from positions;`,
+`select * from briefs;`, `select * from recommendations;`, and
+`select * from settings;` all return empty sets, and the 1.0 pipeline is
+unaffected (`/api/health` unchanged).
