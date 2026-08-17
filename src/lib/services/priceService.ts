@@ -1,20 +1,9 @@
 import YahooFinance from 'yahoo-finance2'
+import { addTradingDays } from '@/lib/marketCalendar'
 import type { MarketSignal } from '@/lib/repositories/signalRepo'
 
 // yahoo-finance2 v2+ requires instantiation; the static API is deprecated (returns never)
 const yf = new YahooFinance()
-
-// Adds N trading days (Mon–Fri; no public holiday calendar)
-function addTradingDays(date: Date, n: number): Date {
-  const d = new Date(date)
-  let remaining = n
-  while (remaining > 0) {
-    d.setDate(d.getDate() + 1)
-    const dow = d.getDay()
-    if (dow !== 0 && dow !== 6) remaining--
-  }
-  return d
-}
 
 // True when enough time has passed that price data should be available
 function isHorizonRipe(signalTime: Date, horizon: '1h' | '1d' | '3d' | '7d'): boolean {

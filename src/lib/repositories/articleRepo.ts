@@ -57,6 +57,31 @@ export async function getUnanalyzedArticles(limit: number): Promise<Article[]> {
   return data as Article[]
 }
 
+export type ArticleWithSource = Article & {
+  sources: { name: string } | null
+}
+
+/**
+ * Articles that passed the pre-filter within the last N hours — the news the
+ * brief context pack is assembled from.
+ */
+export async function getFilteredArticlesSince(
+  hoursBack: number,
+  limit: number
+): Promise<ArticleWithSource[]> {
+  const since = new Date(Date.now() - hoursBack * 3_600_000).toISOString()
+  const db = createServiceClient()
+  const { data, error } = await db
+    .from('articles')
+    .select('*, sources(name)')
+    .eq('passed_filter', true)
+    .gte('fetched_at', since)
+    .order('fetched_at', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+  return data as ArticleWithSource[]
+}
+
 export async function markFilterPass(articleId: string): Promise<void> {
   const db = createServiceClient()
   const { error } = await db

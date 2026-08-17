@@ -721,3 +721,93 @@ unaffected (`/api/health` unchanged).
 
 **Not verified live:** the round trip against IBKR needs the owner's token and
 query ID (manual steps above).
+
+---
+
+## Phase 17 — marketDataService + contextPackService + dry-run preview ✅
+
+**Goal:** Assemble, in code, everything the brief model is allowed to reason
+from — and make it inspectable before a single LLM call is spent.
+
+**What was built:**
+
+- `src/lib/marketCalendar.ts` — framework-free NYSE calendar. `isTradingDay`,
+  `addTradingDays`, `previousTradingDay`, `toDateKey`, plus
+  `assertCalendarCoverage()` which warns when the hardcoded holiday list nears
+  its end (currently through 2028). **Fixes the 1.0 defect** where
+  `addTradingDays` counted any Mon–Fri, drifting every time a horizon spanned a
+  holiday. `priceService` now imports from here instead of its own local copy.
+- `src/lib/services/marketDataService.ts` — all numbers computed in code:
+  - `rsi(closes, 14)` — Wilder smoothing, and `sma(values, period)`. Both pure
+    and exported so they can be checked against a reference series.
+  - `computeTechnicals()` — last close, 1d/5d/1mo change, RSI(14), SMA 20/50/200
+    and % distance from each, 52-week high/low and proximity, last volume vs
+    30-day average. Split from the fetch so it is testable without network.
+  - `getTechnicalsBatch()`, `getMacroSnapshot()` (SPY, QQQ, ^VIX, ^TNX),
+    `getEarningsDates()`, `getLastClose()`. Sequential with a 300 ms gap —
+    Yahoo is unauthenticated and rate-sensitive.
+- `src/lib/repositories/briefRepo.ts` — `Brief`/`BriefContent` types, `getBrief`
+  (by date+type), `getBriefById`, `getLatestGeneratedBrief`, `listBriefs`,
+  `createBrief`, `updateBrief`, `getStalePendingBriefs`,
+  `purgeContextPacksOlderThan`.
+- `src/lib/repositories/recommendationRepo.ts` — ledger types and
+  `createRecommendations`, `getOpenRecommendations` (status-indexed),
+  `applyPricing`, `closeRecommendation`, `updateInvalidation`,
+  `getRecommendationHistory`, `getRecommendationsSince`, `getStalestOpenPricedAt`.
+- `src/lib/repositories/articleRepo.ts` — added `getFilteredArticlesSince()`
+  (passed-filter articles in the last N hours, joined to source name).
+- `src/lib/services/contextPackService.ts` — `buildContextPack(briefType)` and
+  `toCompactPack()`; `approxTokens()` for the size budget.
+- `src/app/api/cron/brief/route.ts` — `maxDuration = 300`, `CRON_SECRET`
+  protected, infers `PREMARKET`/`EVENING` from UTC hour. In Phase 17 every call
+  is a dry run returning the pack; `?compact=1` returns the compact variant.
+
+**Key decisions:**
+
+- **The model does synthesis; the code does arithmetic.** An LLM cannot reliably
+  compute an RSI from a list of closes, but it reasons well about "RSI 28, 12%
+  below the 50-day, earnings in 3 days". Every number in the pack is
+  deterministic, so the brief cannot invent a technical level.
+- **Wilder's RSI specifically**, not a simple-average variant. A different
+  smoothing yields visibly different numbers, and the brief would then disagree
+  with whatever chart the owner is looking at.
+- **Open recommendations are part of the pack**, with live P&L, distance to
+  invalidation, and trading days left. The model must confront its own past
+  calls before proposing new ones — this is what makes the ledger
+  self-correcting rather than an ever-growing pile of forgotten ideas.
+- **The 1.0 regex filter survives as the news *selector*.** It still decides
+  which articles are material; what it no longer does is trigger an LLM call per
+  article. News is then ranked — touches a holding (3) > touches a watchlist or
+  open-rec name (2) > general market (1), newest first within a tier — and
+  capped at 60 items with 240-char snippets.
+- **Watchlist entries already held are dropped from the watchlist section**, since
+  the positions section covers them with more detail. Avoids paying tokens twice
+  for the same ticker.
+- **Market-data failures degrade, never throw.** A ticker whose fetch fails gets
+  `technicals: null` and the brief still generates. One dead symbol must not
+  cost the owner a whole brief.
+- **The compact pack exists for Groq only.** Its free-tier tokens-per-minute
+  ceiling cannot fit the full pack, so the last-resort fallback trims news to 15
+  items, shortens theses, and keeps only the three technicals fields that
+  actually drive a decision.
+
+**Acceptance verified:**
+- `npm run build` clean; `/api/cron/brief` in the route table. `tsc --noEmit` clean.
+- `rsi()` checked against Wilder's reference series: returns **70.46**, which
+  matches hand-computation on that data (gains 3.34/14, losses 1.40/14 → RS
+  2.3857 → 70.46). Continuing the series one bar gives 66.25, confirming the
+  smoothing recurrence. Edge cases: all-gains → 100, flat → 50, too-short → null.
+- `computeTechnicals` over a 260-bar synthetic ramp returns coherent values
+  (SMA20 224.75, SMA200 179.75, +27.68% vs SMA200, at 52-week high, volume ratio
+  1.01); empty input → `null`.
+- `marketCalendar`: Wed 2026-11-25 + 1 trading day → **2026-11-27** (skips
+  Thanksgiving), Thu 2026-12-24 + 1 → **2026-12-28** (skips Christmas and the
+  weekend), `isTradingDay('2026-12-25')` → false, previous trading day from
+  Sunday 2026-08-16 → 2026-08-14.
+
+**Not verified live:** `query2.finance.yahoo.com` is not in this sandbox's
+network egress allowlist, so live technicals could not be fetched here. The
+attempt did confirm the degradation path — each failure logged a warning and
+returned `null`/`[]` rather than throwing. Run the dry-run curl after deploy to
+confirm real data:
+`curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/brief?dry_run=1" | jq '.pack.approx_tokens, .pack.counts'`
