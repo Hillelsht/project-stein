@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
+/* Stein is a dark-only app — the brief is read pre-dawn and after the close. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #09090b;
+  --foreground: #e8e8ee;
 }
 
 @theme inline {
@@ -12,15 +13,10 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Use the Geist fonts wired up in layout.tsx; the scaffold hardcoded Arial
+     here, which silently overrode them everywhere. */
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }

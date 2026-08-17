@@ -5,6 +5,15 @@ import type { NextRequest } from 'next/server'
 /** Paths reachable without a session. Everything else redirects to /login. */
 const PUBLIC_PATHS = new Set(['/login'])
 
+/**
+ * Stein 1.0 routes. Old push notifications and bookmarks still point here, so
+ * they redirect rather than 404.
+ */
+const LEGACY_REDIRECTS: Record<string, string> = {
+  '/watchlist': '/portfolio',
+  '/stats': '/scoreboard',
+}
+
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
 
@@ -39,6 +48,11 @@ export async function proxy(request: NextRequest) {
 
   if (user && path === '/login') {
     return NextResponse.redirect(new URL('/', request.url))
+  }
+
+  const legacy = LEGACY_REDIRECTS[path]
+  if (legacy) {
+    return NextResponse.redirect(new URL(legacy, request.url))
   }
 
   return supabaseResponse

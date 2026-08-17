@@ -38,24 +38,18 @@ export async function addTickerAction(symbol: string): Promise<{ error?: string 
     throw err
   }
 
-  revalidatePath('/watchlist')
+  revalidatePath('/portfolio')
   return {}
 }
 
 export async function removeTickerAction(symbol: string): Promise<void> {
   const user = await requireUser()
   await removeTicker(user.id, symbol)
-  revalidatePath('/watchlist')
+  revalidatePath('/portfolio')
 }
 
 export async function searchTickersAction(
   prefix: string,
 ): Promise<{ ticker_symbol: string; company_name: string | null }[]> {
   return searchTickers(prefix, 10)
-}
-
-export async function signOutAction(): Promise<void> {
-  const supabase = await createServerClient()
-  await supabase.auth.signOut()
-  redirect('/login')
 }

@@ -1,88 +1,85 @@
 import Link from 'next/link'
-import { createServerClient } from '@/lib/supabase/server'
-import { getWatchlist } from '@/lib/repositories/watchlistRepo'
-import { getRecentSignalsWithContext } from '@/lib/repositories/signalRepo'
-import { signOutAction } from './watchlist/actions'
-import SignalCard from '@/components/SignalCard'
-import FeedToggle from '@/components/FeedToggle'
+import Nav from '@/components/Nav'
+import BriefView from '@/components/BriefView'
+import RunNowPanel from '@/components/RunNowPanel'
 import LegalFooter from '@/components/LegalFooter'
 import OpsBanner from '@/components/OpsBanner'
+import { getLatestGeneratedBrief } from '@/lib/repositories/briefRepo'
+import { getRecommendationsForBrief } from '@/lib/repositories/recommendationRepo'
+import { getSetting } from '@/lib/repositories/settingsRepo'
+import { DEFAULT_MODEL_ID, listModels } from '@/lib/services/modelRegistry'
+import { toDateKey } from '@/lib/marketCalendar'
 
-export default async function FeedPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ view?: string }>
-}) {
-  // Auth is enforced by src/proxy.ts — this page only needs the user id.
-  const supabase = await createServerClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return null
+export const dynamic = 'force-dynamic'
 
-  const { view: viewParam } = await searchParams
-  const view: 'watchlist' | 'all' = viewParam === 'all' ? 'all' : 'watchlist'
+const TYPE_LABEL: Record<string, string> = {
+  PREMARKET: 'Pre-market brief',
+  EVENING: 'Evening wrap',
+  ON_DEMAND: 'On-demand brief',
+}
 
-  const watchlist = await getWatchlist(user.id)
-  const watchlistTickers = watchlist.map((w) => w.ticker_symbol)
+export default async function HomePage() {
+  const brief = await getLatestGeneratedBrief()
+  const [recommendations, defaultModel] = await Promise.all([
+    brief ? getRecommendationsForBrief(brief.id) : Promise.resolve([]),
+    getSetting<string>('default_brief_model'),
+  ])
 
-  const showWatchlistEmptyState =
-    view === 'watchlist' && watchlistTickers.length === 0
-
-  const signals = showWatchlistEmptyState
-    ? []
-    : await getRecentSignalsWithContext(
-        view === 'watchlist' ? { tickers: watchlistTickers, limit: 50 } : { limit: 50 },
-      )
+  const today = toDateKey(new Date())
+  const isStale = brief ? brief.brief_date !== today : false
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white">
-      <header className="border-b border-zinc-800 bg-zinc-950 px-4 py-3">
-        <div className="mx-auto flex max-w-lg items-center justify-between">
-          <span className="text-sm font-semibold tracking-tight">Project Stein</span>
-          <nav className="flex items-center gap-4 text-xs">
-            <Link href="/" className="font-semibold text-white">Feed</Link>
-            <Link href="/watchlist" className="text-zinc-400 hover:text-white transition-colors">
-              Watchlist
-            </Link>
-            <Link href="/stats" className="text-zinc-400 hover:text-white transition-colors">
-              Stats
-            </Link>
-            <form action={signOutAction}>
-              <button
-                type="submit"
-                className="text-zinc-400 hover:text-white transition-colors"
-              >
-                Sign out
-              </button>
-            </form>
-          </nav>
-        </div>
-      </header>
+      <Nav active="/" />
 
-      <main className="mx-auto max-w-lg px-4 py-6 space-y-4">
+      <main className="mx-auto max-w-3xl px-4 py-6">
         <OpsBanner />
-        <FeedToggle view={view} />
 
-        <div className="mt-6 space-y-3">
-          {showWatchlistEmptyState ? (
-            <p className="text-sm text-zinc-500">
-              Your watchlist is empty.{' '}
-              <Link href="/watchlist" className="text-indigo-400 hover:text-indigo-300">
-                Add tickers
-              </Link>{' '}
-              to see signals here, or browse{' '}
-              <Link href="/?view=all" className="text-indigo-400 hover:text-indigo-300">
-                all signals
-              </Link>
-              .
-            </p>
-          ) : signals.length === 0 ? (
-            <p className="text-sm text-zinc-500">
-              No signals yet. Check back after the next ingest cycle.
-            </p>
-          ) : (
-            signals.map((signal) => <SignalCard key={signal.id} signal={signal} />)
-          )}
+        <div className="mb-4">
+          <RunNowPanel
+            models={listModels()}
+            defaultModelId={defaultModel ?? DEFAULT_MODEL_ID}
+          />
         </div>
+
+        {!brief ? (
+          <div className="mt-8 rounded-lg border border-zinc-800 bg-zinc-900/60 p-6 text-center">
+            <p className="text-sm text-zinc-300">No brief yet.</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              Scheduled briefs run pre-market and after the close on weekdays, or
+              press <span className="text-zinc-300">Run now</span> above.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-baseline justify-between gap-3">
+              <h1 className="text-xl font-semibold tracking-tight">
+                {TYPE_LABEL[brief.brief_type] ?? 'Brief'}
+              </h1>
+              <span className="font-mono text-xs text-zinc-500">
+                {brief.brief_date}
+                {brief.model ? ` · ${brief.model}` : ''}
+              </span>
+            </div>
+
+            {isStale && (
+              <p className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                This is the most recent brief ({brief.brief_date}), not today&apos;s.
+              </p>
+            )}
+
+            <BriefView brief={brief} recommendations={recommendations} />
+
+            <div className="mt-8 border-t border-zinc-800 pt-4">
+              <Link
+                href="/scoreboard"
+                className="text-xs text-indigo-400 transition-colors hover:text-indigo-300"
+              >
+                Has any of this worked? → Scoreboard
+              </Link>
+            </div>
+          </>
+        )}
 
         <LegalFooter />
       </main>

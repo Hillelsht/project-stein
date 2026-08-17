@@ -1010,3 +1010,65 @@ so the owner can answer "does this thing actually work?" with a number.
 deploy, insert a synthetic OPEN row with a tight invalidation, run
 `curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/score"`,
 confirm it transitions to `CLOSED_INVALIDATED`, then delete the row.
+
+---
+
+## Phase 21 — UI rebuild ✅
+
+**Goal:** The site becomes the brief, its archive, and the scoreboard. The
+signal feed is gone.
+
+**What was built:**
+
+- `src/components/Nav.tsx` — Brief | Archive | Scoreboard | Portfolio | Sign out.
+  Replaces the nav that was copy-pasted into three pages.
+- `src/app/actions.ts` — app-level server actions: `signOutAction` (moved out of
+  the watchlist), `runBriefNowAction`, `setDefaultModelAction`.
+- `src/components/BriefView.tsx` — server component rendering a stored brief:
+  macro strip, market bullets, positions with action badges and live P&L,
+  open-idea updates, new ideas with entry/invalidation/horizon, calendar.
+- `src/components/RunNowPanel.tsx` — **the one client component.** Model picker
+  plus Run button. A `vercel` model generates inline; an `actions` model returns
+  `pending` and the panel polls `/api/briefs/[id]/status` until it flips.
+- `src/app/api/briefs/[id]/status/route.ts` — session-authenticated status poll.
+- `src/app/page.tsx` — today's brief, falling back to the most recent with an
+  amber "not today's" notice.
+- `src/app/briefs/page.tsx` + `src/app/briefs/[id]/page.tsx` — archive and detail.
+- `src/app/scoreboard/page.tsx` — four stat tiles (**alpha vs SPY first**),
+  breakdown by direction and conviction, and the full recommendation history.
+- `src/app/portfolio/page.tsx` — positions with totals and sync age, manual
+  entry (`ManualPositionForm.tsx`), watchlist, and push toggle in one place.
+- `src/lib/services/dispatchService.ts` — builds the pack, parks a PENDING brief,
+  fires the GitHub Actions workflow. (Its worker lands in Phase 22.)
+
+**Deleted:** `src/app/stats/page.tsx`, `src/app/watchlist/page.tsx`,
+`src/components/SignalCard.tsx`, `src/components/FeedToggle.tsx`.
+`WatchlistManager` moved under `/portfolio` and **lost its unused `userEmail`
+prop**, dead since Phase 10.
+
+**Key decisions:**
+
+- **Alpha vs SPY is the first tile on the scoreboard**, ahead of hit rate. The
+  page also explains in plain language why: a good hit rate with negative alpha
+  means the ideas made money but the index would have made more.
+- **`/watchlist` → `/portfolio` and `/stats` → `/scoreboard` redirect in the
+  proxy.** Bookmarks and any 1.0 push notification still resolve. The auth check
+  runs first, so an unauthenticated hit on a legacy path lands on `/login`.
+- **One client component only.** Everything else stays a server component with
+  URL state (the Phase 10/12 philosophy). `RunNowPanel` has to be a client
+  component because subscription-backed models finish asynchronously.
+- **The brief page links to the scoreboard** with "Has any of this worked?" —
+  the accountability loop should be one click from the recommendations.
+- **globals.css Geist fix.** The scaffold hardcoded `font-family: Arial` on
+  `body`, silently overriding the Geist fonts `layout.tsx` has loaded since
+  Phase 0. Now uses `var(--font-geist-sans)`; light-mode variables dropped since
+  the app is deliberately dark-only.
+
+**Acceptance verified:**
+- `npm run build` + `tsc --noEmit` clean. Route table: `/`, `/briefs`,
+  `/briefs/[id]`, `/scoreboard`, `/portfolio`, `/login`,
+  `/api/briefs/[id]/status` — no `/stats` or `/watchlist` pages.
+- **Ran the dev server and probed it live:** `/login` returns 200 and renders the
+  email+password form (no magic-link copy); `/` unauthenticated returns 307 to
+  `/login`; `/watchlist` and `/stats` return 307 rather than 404.
+- Screenshotted `/login` — renders correctly in Geist, confirming the font fix.

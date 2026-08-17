@@ -1,18 +1,12 @@
 'use client'
 
 import { useRef, useState, useTransition } from 'react'
-import { addTickerAction, removeTickerAction, searchTickersAction } from './actions'
+import { addTickerAction, removeTickerAction, searchTickersAction } from './watchlistActions'
 import type { WatchlistEntry } from '@/lib/repositories/watchlistRepo'
 
 type Suggestion = { ticker_symbol: string; company_name: string | null }
 
-export default function WatchlistManager({
-  entries,
-  userEmail,
-}: {
-  entries: WatchlistEntry[]
-  userEmail: string
-}) {
+export default function WatchlistManager({ entries }: { entries: WatchlistEntry[] }) {
   const [query, setQuery] = useState('')
   const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [addError, setAddError] = useState<string | null>(null)
