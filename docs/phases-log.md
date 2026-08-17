@@ -511,3 +511,76 @@ Two changes:
 - `src/lib/repositories/articleRepo.ts` — removed the now-unused `getLatestFetchedAt()` (per the no-dead-code rule).
 
 The new metric measures cron health independent of news volume, which is what we actually want to alert on.
+
+---
+
+# Stein 2.0 — Portfolio-aware decision briefs
+
+Stein 1.0 (Phases 0–13) shipped a per-article sentiment feed. It was judged not
+valuable: per-article scores are not tradeable, the LLM economics were wrong
+(800 tiny Flash-Lite calls on truncated snippets), auth friction was high, and
+the system was blind to the owner's actual portfolio. The GitHub Actions cron
+had also been auto-disabled after 60 days of repo inactivity, so the pipeline
+had been dead for months.
+
+Stein 2.0 inverts the pipeline: **few large LLM calls with rich context**
+instead of many small calls with none. The product is a twice-daily,
+portfolio-aware decision brief (plus on-demand runs) delivered by email and
+push, where every recommendation is logged, priced against SPY, and scored on
+an honest scoreboard.
+
+---
+
+## Phase 14 — Auth rework: password sign-in, one protection layer ✅
+
+**Goal:** Kill magic links. Sign in with a password once and stay signed in;
+protect every page in exactly one place.
+
+**What was built:**
+
+- `src/app/(auth)/login/page.tsx` — rewritten. `signInWithPassword` replaces
+  `signInWithOtp`; the "check your email" state is gone. On success:
+  `router.replace('/')` + `router.refresh()` so the proxy sees the new session
+  cookie before the redirect lands. Auth errors are rendered inline (1.0
+  declared a `searchParams.error` prop and never read it, so expired links
+  showed a blank form).
+- `src/proxy.ts` — inverted from an allowlist of protected paths to a
+  `PUBLIC_PATHS` denylist: any path that is not `/login` redirects to `/login`
+  when unauthenticated; authenticated users on `/login` bounce to `/`. Matcher
+  now also excludes `manifest.json`, `sw.js`, and `icon.svg` — PWA assets must
+  load without a session or the service worker fails to register.
+- Deleted `src/app/auth/callback/route.ts` (and the `src/app/auth/` directory).
+  The dual PKCE / token-hash handling existed only to absorb Supabase email
+  template differences; with password auth there is no callback at all.
+- `src/app/page.tsx`, `src/app/watchlist/page.tsx`, `src/app/stats/page.tsx` —
+  removed the per-page `redirect('/login')` blocks. Pages still call
+  `getUser()` where they need the user id and `return null` defensively, but
+  the proxy is now the single source of auth truth.
+
+**Key decisions:**
+
+- **Session longevity is a dashboard setting, not code.** JWT expiry stays 1h;
+  refresh tokens do not expire as long as "time-boxed sessions" and "inactivity
+  timeout" are off in Supabase → Authentication → Sessions. The proxy's
+  `getUser()` call refreshes the session cookie on every request, so any visit
+  inside the refresh window keeps the session alive indefinitely.
+- **No signup, no password reset UI.** Single-user app: the password is set once
+  from the Supabase dashboard, and dashboard reset is the recovery path. Adding
+  a reset flow would re-introduce the transactional-email dependency that made
+  magic links painful.
+- **`return null` instead of `redirect()` in pages.** The proxy already
+  guarantees a user; the check is defence-in-depth for a misconfigured matcher,
+  and returning null avoids a second redirect hop.
+
+**Manual steps required by the owner:**
+1. Supabase dashboard → Authentication → Users → set a password on the account.
+2. Supabase dashboard → Authentication → Sessions → confirm "time-boxed
+   sessions" and "inactivity timeout" are disabled.
+
+**Acceptance verified:**
+- `npm run build` clean. Route table no longer contains `/auth/callback`;
+  `/login` still prerenders as static.
+- TypeScript clean (`tsc --noEmit`).
+
+**Not verified live:** actual sign-in requires the password to be set in the
+Supabase dashboard first (manual step above).

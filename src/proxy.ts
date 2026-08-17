@@ -2,6 +2,9 @@ import { createServerClient } from '@supabase/ssr'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
+/** Paths reachable without a session. Everything else redirects to /login. */
+const PUBLIC_PATHS = new Set(['/login'])
+
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
 
@@ -24,23 +27,28 @@ export async function proxy(request: NextRequest) {
     }
   )
 
-  // getUser() refreshes the session if needed — do not remove
+  // getUser() refreshes the session if needed — do not remove.
+  // This is what keeps the session alive indefinitely between visits.
   const { data: { user } } = await supabase.auth.getUser()
 
   const path = request.nextUrl.pathname
 
-  if (!user && path.startsWith('/watchlist')) {
+  if (!user && !PUBLIC_PATHS.has(path)) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
 
   if (user && path === '/login') {
-    return NextResponse.redirect(new URL('/watchlist', request.url))
+    return NextResponse.redirect(new URL('/', request.url))
   }
 
   return supabaseResponse
 }
 
 export const config = {
-  // Exclude static assets and API routes (cron routes must not require auth)
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/).*)', '/'],
+  // Exclude static assets, PWA assets (must load unauthenticated so the service
+  // worker and manifest work), and API routes (cron routes carry their own auth).
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|manifest.json|sw.js|icon.svg|api/).*)',
+    '/',
+  ],
 }

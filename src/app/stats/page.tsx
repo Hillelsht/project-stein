@@ -1,5 +1,4 @@
 import Link from 'next/link'
-import { redirect } from 'next/navigation'
 import { createServerClient } from '@/lib/supabase/server'
 import { computeStats } from '@/lib/services/validationService'
 import { signOutAction } from '../watchlist/actions'
@@ -43,7 +42,7 @@ export default async function StatsPage({
 }) {
   const supabase = await createServerClient()
   const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
+  if (!user) return null // auth enforced by src/proxy.ts
 
   const { days: daysParam } = await searchParams
   const days = clampDays(daysParam)

@@ -1,15 +1,13 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
-export default function LoginPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ error?: string }>
-}) {
+export default function LoginPage() {
+  const router = useRouter()
   const [email, setEmail] = useState('')
-  const [sent, setSent] = useState(false)
+  const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -19,34 +17,20 @@ export default function LoginPage({
     setLoading(true)
 
     const supabase = createClient()
-    const { error: authError } = await supabase.auth.signInWithOtp({
+    const { error: authError } = await supabase.auth.signInWithPassword({
       email,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-        shouldCreateUser: false, // only pre-created users can log in
-      },
+      password,
     })
 
-    setLoading(false)
     if (authError) {
+      setLoading(false)
       setError(authError.message)
-    } else {
-      setSent(true)
+      return
     }
-  }
 
-  if (sent) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-zinc-950">
-        <div className="w-full max-w-sm text-center px-4">
-          <h1 className="text-2xl font-semibold text-white">Check your email</h1>
-          <p className="mt-3 text-zinc-400 text-sm">
-            We sent a magic link to <span className="text-white">{email}</span>.
-            Click it to sign in.
-          </p>
-        </div>
-      </main>
-    )
+    // refresh() so the proxy sees the new session cookie before we land on '/'
+    router.replace('/')
+    router.refresh()
   }
 
   return (
@@ -66,6 +50,7 @@ export default function LoginPage({
               id="email"
               type="email"
               required
+              autoComplete="username"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
@@ -73,18 +58,35 @@ export default function LoginPage({
             />
           </div>
 
-          {error && (
-            <p className="text-sm text-red-400">{error}</p>
-          )}
+          <div>
+            <label htmlFor="password" className="block text-sm font-medium text-zinc-300 mb-1">
+              Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              required
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+
+          {error && <p className="text-sm text-red-400">{error}</p>}
 
           <button
             type="submit"
             disabled={loading}
             className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            {loading ? 'Sending…' : 'Send magic link'}
+            {loading ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
+
+        <p className="mt-6 text-center text-xs text-zinc-600">
+          Sessions are long-lived — you should not need to sign in often.
+        </p>
       </div>
     </main>
   )

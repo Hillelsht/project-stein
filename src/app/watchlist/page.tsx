@@ -1,5 +1,4 @@
 import Link from 'next/link'
-import { redirect } from 'next/navigation'
 import { createServerClient } from '@/lib/supabase/server'
 import { getWatchlist } from '@/lib/repositories/watchlistRepo'
 import WatchlistManager from './WatchlistManager'
@@ -11,7 +10,7 @@ export default async function WatchlistPage() {
   const supabase = await createServerClient()
   const { data: { user } } = await supabase.auth.getUser()
 
-  if (!user) redirect('/login')
+  if (!user) return null // auth enforced by src/proxy.ts
 
   const entries = await getWatchlist(user.id)
 

@@ -1,5 +1,4 @@
 import Link from 'next/link'
-import { redirect } from 'next/navigation'
 import { createServerClient } from '@/lib/supabase/server'
 import { getWatchlist } from '@/lib/repositories/watchlistRepo'
 import { getRecentSignalsWithContext } from '@/lib/repositories/signalRepo'
@@ -14,9 +13,10 @@ export default async function FeedPage({
 }: {
   searchParams: Promise<{ view?: string }>
 }) {
+  // Auth is enforced by src/proxy.ts — this page only needs the user id.
   const supabase = await createServerClient()
   const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
+  if (!user) return null
 
   const { view: viewParam } = await searchParams
   const view: 'watchlist' | 'all' = viewParam === 'all' ? 'all' : 'watchlist'
