@@ -648,3 +648,76 @@ Run `supabase/migrations/0004_stein2_schema.sql` in the Supabase SQL editor
 `select * from briefs;`, `select * from recommendations;`, and
 `select * from settings;` all return empty sets, and the 1.0 pipeline is
 unaffected (`/api/health` unchanged).
+
+---
+
+## Phase 16 — flexService: IBKR positions sync ✅
+
+**Goal:** `positions` mirrors the real IBKR account, refreshed before each brief.
+
+**What was built:**
+
+- `src/lib/repositories/positionRepo.ts` — `Position`/`NewPosition` types,
+  `getPositions`, `getPositionTickers`, `countBySource`, `upsertPositions`
+  (upsert on `(broker, ticker_symbol)`), `deleteMissingSyncedPositions`,
+  `upsertManualPosition`, `deletePosition`, `getLatestSyncedAt` (for Phase 24 ops).
+- `src/lib/services/flexService.ts` — the Flex Web Service client:
+  - `sendRequest()` → `SendRequest?t=&q=&v=3` returns a `ReferenceCode` + the
+    GetStatement base URL.
+  - `getStatement()` → polls with backoff. Error **1019** ("generation in
+    progress") retries on a `[3s, 5s, 5s, 10s, 10s, 10s]` schedule (~43s total,
+    inside the route's 60s `maxDuration`). Error **1018** (throttled) gets one
+    30s back-off. Any other `ErrorCode` throws a typed `FlexError`.
+  - `parseOpenPositions()` — regex over `<OpenPosition …/>` elements plus an
+    attribute splitter. Aggregates multiple lots of the same symbol (quantity
+    summed, cost basis weighted by quantity), preserves negative quantities for
+    shorts, drops closed lots (`position="0"`), and skips non-`STK` asset
+    categories with a count.
+  - `syncPositions()` — upsert everything parsed, then delete `source='flex'`
+    rows whose ticker is absent from the statement.
+- `src/app/api/cron/sync-positions/route.ts` — `maxDuration = 60`, standard
+  `CRON_SECRET` bearer check.
+- `.github/workflows/cron.yml` — two new schedules, `30 10 * * 1-5` and
+  `0 21 * * 1-5` (each ~30 min before a brief), routed to a `sync-positions` job.
+
+**Key decisions:**
+
+- **No XML parser dependency.** Flex position XML is flat and attribute-only, so
+  a regex over `<OpenPosition …/>` plus an attribute splitter covers it. Adding
+  a parser package would be a dependency with nothing to do.
+- **Empty-statement guard.** If the statement parses to zero positions while
+  synced rows already exist, the sync aborts with
+  `{ ok: false, reason: 'empty_statement_guard' }` instead of deleting. A
+  truncated or failed statement would otherwise wipe the portfolio the brief
+  model reasons over — one stale sync is far cheaper than a brief that thinks
+  the account is empty.
+- **`source` separates synced from manual rows.** Sync replaces `flex` rows
+  wholesale but never touches `manual` ones, so hand-entered holdings (assets
+  IBKR does not report, or a second broker before its adapter exists) survive.
+- **Only `STK` is synced.** Options and futures need different context
+  (greeks, expiry, margin) than the brief prompt is built for; syncing them
+  would put rows in front of the model it cannot reason about properly. They
+  are counted and logged, not silently dropped.
+- **Unknown tickers are kept, not filtered.** A holding absent from
+  `tickers_master` (foreign listing, recent IPO) is still a real position; the
+  model should see it. Validation against `tickers_master` belongs on *model
+  output*, not on the owner's actual account.
+
+**Manual steps required by the owner (~10 min, one time):**
+1. IBKR Client Portal → Performance & Reports → Flex Queries → new **Activity
+   Flex Query** with the *Open Positions* section, format **XML**, period
+   **Last Business Day**. Note the query ID.
+2. Settings → Account Settings → Flex Web Service → **generate token**.
+3. Add `IBKR_FLEX_TOKEN` and `IBKR_FLEX_QUERY_ID` to Vercel env.
+
+**Acceptance verified:**
+- `npm run build` clean; `/api/cron/sync-positions` in the route table.
+- `parseOpenPositions` exercised against a realistic multi-lot statement:
+  two AAPL lots aggregate to 150 shares with a quantity-weighted cost basis of
+  186.83 (from 100 @ 180.25 and 50 @ 200.00), a short NVDA keeps `-40`, an `OPT`
+  row is skipped (`skipped: 1`), a `position="0"` lot is dropped, and
+  `reportDate="20260814"` converts to `2026-08-14T00:00:00Z`. An empty
+  statement parses to `[]` rather than throwing.
+
+**Not verified live:** the round trip against IBKR needs the owner's token and
+query ID (manual steps above).

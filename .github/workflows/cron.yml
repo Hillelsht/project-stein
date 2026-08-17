@@ -10,20 +10,25 @@ on:
     # (the two schedules above cover Mon-Fri and the off-hour band; without this
     # rule weekends had a 9-hour ingest gap that triggered false ops alarms.)
     - cron: '0 14-21 * * 0,6'
-    # Daily price validation at 02:00 UTC (Phase 8 — will 404 until built)
+    # Daily price validation at 02:00 UTC
     - cron: '0 2 * * *'
     # Dedup hash cleanup at 03:00 UTC
     - cron: '0 3 * * *'
     # Weekly ticker master refresh, Sunday 04:00 UTC
     - cron: '0 4 * * 0'
+    # Portfolio sync ahead of each brief, weekdays (Stein 2.0)
+    - cron: '30 10 * * 1-5'
+    - cron: '0 21 * * 1-5'
   workflow_dispatch:
 
 jobs:
   ingest-analyze:
     name: Ingest + Analyze
-    # Runs on all schedules except the three dedicated jobs, and on manual trigger.
+    # Runs on all schedules except the dedicated jobs, and on manual trigger.
     # Empty schedule string (workflow_dispatch) != any of the excluded strings → runs.
-    if: "github.event.schedule != '0 2 * * *' && github.event.schedule != '0 3 * * *' && github.event.schedule != '0 4 * * 0'"
+    # NOTE: this string-comparison routing is replaced by a single case-routed
+    # job in Phase 23; new schedules must be excluded here until then.
+    if: "github.event.schedule != '0 2 * * *' && github.event.schedule != '0 3 * * *' && github.event.schedule != '0 4 * * 0' && github.event.schedule != '30 10 * * 1-5' && github.event.schedule != '0 21 * * 1-5'"
     runs-on: ubuntu-latest
     steps:
       - name: Ingest
@@ -38,9 +43,19 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "${{ secrets.APP_URL }}/api/cron/analyze"
 
+  sync-positions:
+    name: Sync IBKR Positions
+    if: "github.event.schedule == '30 10 * * 1-5' || github.event.schedule == '0 21 * * 1-5'"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/sync-positions"
+
   validate:
     name: Validate Signals
-    # Phase 8 builds this endpoint; job will fail with 404 until then.
     if: github.event.schedule == '0 2 * * *'
     runs-on: ubuntu-latest
     steps:
