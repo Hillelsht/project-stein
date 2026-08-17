@@ -1,8 +1,6 @@
 import { createHash } from 'crypto'
 import { BLOCKLIST, validateTickerBatch } from '@/lib/repositories/tickerMasterRepo'
 import { hashExists, saveHash } from '@/lib/repositories/dedupRepo'
-import { getAllWatchlistTickers } from '@/lib/repositories/watchlistRepo'
-import { countAnalysesToday } from '@/lib/repositories/analysisRepo'
 import type { Article } from '@/lib/repositories/articleRepo'
 
 // ── Stage 1: Ticker extraction ──────────────────────────────────────────────
@@ -111,24 +109,18 @@ export async function runFilterPipeline(article: Article): Promise<FilterResult>
     }
   }
 
-  // Stage 4: Dedup — check 48hr hash window; save hash on pass
+  // Stage 4: Dedup — 48hr hash window.
+  //
+  // The hash is saved only after every rejection stage has passed. Stein 1.0
+  // saved it before the LLM budget check, so an article dropped for budget left
+  // its hash behind and the story was suppressed permanently — the news was
+  // lost, not deferred. There is no budget stage any more, but the ordering is
+  // kept deliberately: a hash must only ever record something that passed.
   const hash = computeDedupHash(article.title, rawContent)
   if (await hashExists(hash)) {
     return { pass: false, reason: 'duplicate', tickers }
   }
   await saveHash(hash, article.id)
-
-  // Stage 5 + 6: Watchlist priority determines whether budget check applies
-  const watchlistTickers = await getAllWatchlistTickers()
-  const watchlistSet = new Set(watchlistTickers)
-  const isWatchlistMatch = tickers.some((t) => watchlistSet.has(t))
-
-  if (!isWatchlistMatch) {
-    const todayCount = await countAnalysesToday()
-    if (todayCount >= 800) {
-      return { pass: false, reason: 'daily_budget', tickers }
-    }
-  }
 
   return { pass: true, tickers }
 }

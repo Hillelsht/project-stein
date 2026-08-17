@@ -1,21 +1,9 @@
 import webpush from 'web-push'
 import {
   getAllSubscriptions,
-  getSubscriptionsForUsers,
   deleteSubscription,
   type PushSubscription,
 } from '@/lib/repositories/pushRepo'
-import { getUsersWatchingTicker } from '@/lib/repositories/watchlistRepo'
-import {
-  countSentToday,
-  recordPushSent,
-  wasTickerPushedRecently,
-} from '@/lib/repositories/pushHistoryRepo'
-import type { MarketSignal } from '@/lib/repositories/signalRepo'
-
-const SCORE_THRESHOLD = 8
-const DAILY_PUSH_CAP = 10
-const TICKER_DEDUP_MINUTES = 30
 
 let vapidConfigured = false
 function configureVapid(): boolean {
@@ -75,44 +63,4 @@ export async function sendPushToAllSubscriptions(payload: Payload): Promise<numb
     return 0
   }
   return deliver(subs, payload)
-}
-
-async function sendToUser(userId: string, payload: Payload, signal: MarketSignal): Promise<void> {
-  const subs = await getSubscriptionsForUsers([userId])
-  if (subs.length === 0) return
-
-  const delivered = await deliver(subs, payload)
-
-  if (delivered > 0) {
-    await recordPushSent({
-      user_id: userId,
-      ticker_symbol: signal.ticker_symbol,
-      signal_id: signal.id,
-    })
-  }
-}
-
-export async function notifyForSignal(signal: MarketSignal, summary: string): Promise<void> {
-  if (signal.sentiment_score < SCORE_THRESHOLD) return
-  if (!configureVapid()) return
-
-  const watchers = await getUsersWatchingTicker(signal.ticker_symbol)
-  if (watchers.length === 0) return
-
-  const payload: Payload = {
-    title: `${signal.ticker_symbol} · ${signal.sentiment} · ${signal.sentiment_score}/10`,
-    body: summary.slice(0, 200),
-    url: `/?highlight=${signal.id}`,
-    tag: signal.ticker_symbol,
-  }
-
-  for (const userId of watchers) {
-    if (await wasTickerPushedRecently(userId, signal.ticker_symbol, TICKER_DEDUP_MINUTES)) {
-      continue
-    }
-    if ((await countSentToday(userId)) >= DAILY_PUSH_CAP) {
-      continue
-    }
-    await sendToUser(userId, payload, signal)
-  }
 }

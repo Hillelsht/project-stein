@@ -82,6 +82,23 @@ export async function getFilteredArticlesSince(
   return data as ArticleWithSource[]
 }
 
+/**
+ * Drops rejected articles past a retention window. Passed articles are kept —
+ * they are the brief's news history and are cheap by comparison.
+ */
+export async function purgeRejectedOlderThan(days: number): Promise<number> {
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString()
+  const db = createServiceClient()
+  const { data, error } = await db
+    .from('articles')
+    .delete()
+    .eq('passed_filter', false)
+    .lt('fetched_at', cutoff)
+    .select('id')
+  if (error) throw error
+  return (data as { id: string }[] | null)?.length ?? 0
+}
+
 export async function markFilterPass(articleId: string): Promise<void> {
   const db = createServiceClient()
   const { error } = await db

@@ -1141,3 +1141,75 @@ in GitHub Actions — so the subscription is reachable from there.
 **Not verified live:** needs the owner's `CLAUDE_CODE_OAUTH_TOKEN` and
 `GITHUB_DISPATCH_TOKEN`. After setup: press Run now with a Claude model, watch
 the run appear in the Actions tab, and confirm the brief flips to GENERATED.
+
+---
+
+## Phase 23 — Cutover: cron rework, keepalive, retire per-article LLM ✅
+
+**Goal:** Stop making 800 tiny LLM calls a day, and make the cron impossible to
+silently break — the two failures that between them killed Stein 1.0.
+
+**What was built:**
+
+- `.github/workflows/cron.yml` — **rewritten as one job with one routing table.**
+  A `case` on the schedule string maps each entry to a space-separated endpoint
+  list; an unmapped schedule prints a GitHub error annotation and **fails the
+  run**. 1.0 spread routing across per-job `if:` expressions, so adding a
+  schedule without editing every job's condition silently orphaned it — which is
+  precisely how weekends ended up with an 8-hour ingest gap.
+- **Keepalive job** (`0 5 1 * *`, monthly): `gh api -X PUT
+  repos/.../actions/workflows/cron.yml/enable` with `permissions: actions:
+  write`. GitHub disables scheduled workflows after 60 days of repository
+  inactivity — that is what stopped 1.0 dead. Re-enabling resets the clock
+  whether or not anyone has committed.
+- `src/app/api/cron/select/route.ts` — replaces `analyze`. Runs the same filter
+  pipeline to mark `passed_filter`, makes **zero LLM calls**, and catches
+  per-article errors so one bad row cannot abort the batch.
+- `src/app/api/cron/cleanup/route.ts` — replaces `dedup-cleanup`. Purges dedup
+  hashes (48h), nulls stored context packs older than 30 days, and deletes
+  rejected articles older than 90 days.
+- `src/lib/repositories/articleRepo.ts` — added `purgeRejectedOlderThan(days)`.
+- `src/lib/services/filterService.ts` — removed the LLM budget stage and the
+  watchlist-priority bypass, and with them the `analysisRepo`/`watchlistRepo`
+  imports.
+- `src/lib/services/pushService.ts` — dropped `notifyForSignal` and its
+  per-ticker cap/dedup logic; only the generic brief sender remains.
+
+**Deleted:** `api/cron/analyze`, `api/cron/validate`, `api/cron/dedup-cleanup`,
+`api/stats`, `llmService.ts`, `validationService.ts`, `sentimentPrompt.ts`.
+
+**Final schedule (all UTC):**
+
+| Cron | Endpoints |
+|---|---|
+| `*/30 11-22 * * 1-5` | ingest, select |
+| `0 0-10,23 * * *` / `0 * * * 0,6` | ingest, select (off-hours, weekends) |
+| `30 10 * * 1-5` / `0 21 * * 1-5` | sync-positions |
+| `0 11` / `45 11` `* * 1-5` | brief (pre-market, then retry+heal) |
+| `30 21` / `15 22` `* * 1-5` | brief (evening, then retry+heal) |
+| `0 2 * * 2-6` | score |
+| `0 3 * * *` | cleanup |
+| `0 4 * * 0` | refresh-tickers |
+| `0 5 1 * *` | keepalive |
+
+**Key decisions:**
+
+- **The dedup-hash ordering is preserved deliberately.** 1.0 saved the hash
+  before the budget check, so a budget-dropped article left its hash behind and
+  that story could never be seen again — the news was lost, not deferred. There
+  is no budget stage now, but the invariant is documented in the code: a hash
+  must only ever record something that actually passed.
+- **Ingest drops from every 10 minutes to every 30.** Two briefs a day do not
+  need 10-minute news granularity, and it roughly thirds the Actions minutes.
+- **`workflow_dispatch` takes an `endpoints` input**, so any endpoint can be run
+  by hand from the Actions tab without editing the file.
+
+**Acceptance verified:**
+- Clean rebuild (`rm -rf .next && npm run build`) + `tsc --noEmit` clean.
+- Route table confirms `analyze`, `validate`, `dedup-cleanup`, and `stats` are
+  gone and `select` + `cleanup` are present.
+- Parsed the workflow and checked all **13** schedules against the `case` block:
+  every one is mapped, and the keepalive job is present.
+
+**Not verified live:** the first re-enable after months of inactivity is manual
+(Actions tab → workflow → Enable). Pushing this commit also resets the clock.
