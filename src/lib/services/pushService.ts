@@ -1,5 +1,10 @@
 import webpush from 'web-push'
-import { getSubscriptionsForUsers, deleteSubscription } from '@/lib/repositories/pushRepo'
+import {
+  getAllSubscriptions,
+  getSubscriptionsForUsers,
+  deleteSubscription,
+  type PushSubscription,
+} from '@/lib/repositories/pushRepo'
 import { getUsersWatchingTicker } from '@/lib/repositories/watchlistRepo'
 import {
   countSentToday,
@@ -29,10 +34,8 @@ function configureVapid(): boolean {
 
 type Payload = { title: string; body: string; url: string; tag?: string }
 
-async function sendToUser(userId: string, payload: Payload, signal: MarketSignal): Promise<void> {
-  const subs = await getSubscriptionsForUsers([userId])
-  if (subs.length === 0) return
-
+/** Sends to a set of subscriptions, purging any the browser reports as dead. */
+async function deliver(subs: PushSubscription[], payload: Payload): Promise<number> {
   const body = JSON.stringify(payload)
   let delivered = 0
 
@@ -56,6 +59,29 @@ async function sendToUser(userId: string, payload: Payload, signal: MarketSignal
       }
     }),
   )
+
+  return delivered
+}
+
+/**
+ * Sends one notification to every registered device. Used for brief-ready
+ * alerts, which are not per-ticker and have no watchlist to filter on.
+ */
+export async function sendPushToAllSubscriptions(payload: Payload): Promise<number> {
+  if (!configureVapid()) return 0
+  const subs = await getAllSubscriptions()
+  if (subs.length === 0) {
+    console.log('[push] no subscriptions registered')
+    return 0
+  }
+  return deliver(subs, payload)
+}
+
+async function sendToUser(userId: string, payload: Payload, signal: MarketSignal): Promise<void> {
+  const subs = await getSubscriptionsForUsers([userId])
+  if (subs.length === 0) return
+
+  const delivered = await deliver(subs, payload)
 
   if (delivered > 0) {
     await recordPushSent({

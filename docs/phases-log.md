@@ -889,3 +889,66 @@ recommendation ledger — and make a failed brief heal itself.
 **Not verified live:** an end-to-end generation needs `GEMINI_API_KEY` and
 network egress to the provider, neither of which this sandbox has. After deploy:
 `curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/brief?type=premarket"`
+
+---
+
+## Phase 19 — Email + push delivery ✅
+
+**Goal:** The brief comes to the owner. The website becomes the archive, not the
+thing he has to remember to open.
+
+**What was built:**
+
+- `src/lib/services/emailService.ts` — `sendEmail()` posting to
+  `api.resend.com/emails` over plain `fetch`, plus `getRecipient()` and a typed
+  `EmailNotConfiguredError` so a missing key is distinguishable from a send failure.
+- `src/lib/briefHtml.ts` — `renderBriefHtml()` and `briefSubject()`. Table
+  layout, inline CSS, dark palette. Sections: macro strip (SPY/QQQ/VIX/10Y with
+  moves), market bullets, positions with action badges and live P&L, open-idea
+  updates with return and decision, new ideas with entry zone / invalidation /
+  horizon, and the two-week calendar. Everything is escaped via `esc()`.
+- `src/lib/repositories/pushRepo.ts` — added `getAllSubscriptions()`.
+- `src/lib/services/pushService.ts` — extracted the send-and-purge loop into
+  `deliver()`, added `sendPushToAllSubscriptions(payload)`. `notifyForSignal`
+  now rides on the same helper (it is deleted in Phase 23).
+- `src/lib/services/briefService.ts` — `deliverBrief(briefId)`, called from both
+  generation paths and from the already-generated branch.
+
+**Key decisions:**
+
+- **Delivery never fails a brief.** Email and push are each wrapped in their own
+  try/catch. A brief that generated correctly but could not be emailed is still
+  a good brief — `emailed_at` simply stays null.
+- **The retry firing doubles as an email retry.** When the second cron firing
+  finds an already-`GENERATED` brief, it still calls `deliverBrief()`, which
+  re-attempts only the parts that have not succeeded. A transient Resend outage
+  costs a delay, not the email.
+- **The subject line carries the decision.** `Stein Pre-market · 2026-08-17 · 1
+  new idea, 2 position actions` — or `· no action` on a quiet day. The owner can
+  triage from the notification without opening anything.
+- **Push tap URL is `/`.** 1.0 sent `/?highlight=<signal_id>`, which no page ever
+  read, so every notification tap landed on an unchanged feed.
+- **`onboarding@resend.dev` is the default sender.** Resend allows it to reach
+  the account owner's own inbox with no domain verification, so setup is one API
+  key. `BRIEF_FROM_EMAIL` overrides it once a domain is verified.
+- **The disclaimer points at the scoreboard** rather than being generic legal
+  boilerplate — the useful version of "not financial advice" here is "check
+  whether these calls have actually worked".
+
+**Manual steps required by the owner:**
+1. Create a free Resend account, generate an API key.
+2. Add `RESEND_API_KEY` and `BRIEF_RECIPIENT_EMAIL` to Vercel env.
+
+**Acceptance verified:**
+- `npm run build` + `tsc --noEmit` clean.
+- `renderBriefHtml` rendered against a realistic brief (4 macro bullets, 3
+  holdings with P&L, 2 open-idea updates, 1 new idea, 2 calendar items) →
+  13.3 KB of valid HTML, well under any clipping threshold.
+- **Escaping verified:** a macro bullet containing `<script>alert(1)</script> &
+  "quotes"` renders as `&lt;script&gt;…` with no executable tag in the output.
+- **Empty-state verified:** a brief with no ideas and no reviews renders the
+  "No new trade ideas today." line and produces the subject
+  `Stein Pre-market · 2026-08-17 · no action`.
+
+**Not verified live:** actual delivery needs `RESEND_API_KEY` and a registered
+push subscription. After deploy, trigger a brief and check the Resend dashboard.

@@ -19,8 +19,12 @@ import {
 import { getPositionTickers } from '@/lib/repositories/positionRepo'
 import { validateTickerBatch } from '@/lib/repositories/tickerMasterRepo'
 import { getSetting } from '@/lib/repositories/settingsRepo'
+import { getRecommendationsForBrief } from '@/lib/repositories/recommendationRepo'
+import { briefSubject, renderBriefHtml } from '@/lib/briefHtml'
 import { buildContextPack, toCompactPack, type ContextPack } from '@/lib/services/contextPackService'
+import { EmailNotConfiguredError, getRecipient, sendEmail } from '@/lib/services/emailService'
 import { callModelForJson } from '@/lib/services/llmClient'
+import { sendPushToAllSubscriptions } from '@/lib/services/pushService'
 import {
   DEFAULT_MODEL_ID,
   getModelOrDefault,
@@ -343,6 +347,72 @@ export async function applyBriefToLedger(
   return { opened: created.length, closed, tightened }
 }
 
+// ── Delivery ─────────────────────────────────────────────────────────────────
+
+/**
+ * Emails the brief and fires a push. Delivery failures are logged and swallowed:
+ * a brief that generated correctly but couldn't be emailed is still a good
+ * brief, and the retry cron re-attempts the email on its next pass.
+ */
+export async function deliverBrief(briefId: string): Promise<{ emailed: boolean; pushed: boolean }> {
+  const brief = await getBriefById(briefId)
+  if (!brief || brief.status !== 'GENERATED' || !brief.content) {
+    return { emailed: false, pushed: false }
+  }
+
+  const content = brief.content
+  const pack = (brief.context_pack as unknown as ContextPack | null) ?? null
+  let emailed = Boolean(brief.emailed_at)
+  let pushed = Boolean(brief.pushed_at)
+
+  if (!emailed) {
+    try {
+      const to = getRecipient()
+      if (!to) throw new EmailNotConfiguredError('BRIEF_RECIPIENT_EMAIL')
+      const recommendations = await getRecommendationsForBrief(brief.id)
+      const html = renderBriefHtml({
+        brief,
+        content,
+        recommendations,
+        pack,
+        appUrl: process.env.NEXT_PUBLIC_APP_URL ?? null,
+      })
+      await sendEmail({ to, subject: briefSubject(brief, content), html })
+      await updateBrief(brief.id, { emailed_at: new Date().toISOString() })
+      emailed = true
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn('[brief] email delivery failed:', message)
+    }
+  }
+
+  if (!pushed) {
+    try {
+      const label =
+        brief.brief_type === 'EVENING'
+          ? 'Evening wrap ready'
+          : brief.brief_type === 'ON_DEMAND'
+            ? 'Brief ready'
+            : 'Pre-market brief ready'
+      const sent = await sendPushToAllSubscriptions({
+        title: `Stein — ${label}`,
+        body: content.macro_bullets[0]?.slice(0, 160) ?? 'Open Stein for today’s brief.',
+        // 1.0 pushed '/?highlight=<id>', which no page ever handled.
+        url: '/',
+        tag: 'stein-brief',
+      })
+      if (sent > 0) {
+        await updateBrief(brief.id, { pushed_at: new Date().toISOString() })
+        pushed = true
+      }
+    } catch (err) {
+      console.warn('[brief] push delivery failed:', (err as Error).message)
+    }
+  }
+
+  return { emailed, pushed }
+}
+
 // ── Orchestration ────────────────────────────────────────────────────────────
 
 async function resolveDefaultModelId(): Promise<string> {
@@ -397,6 +467,9 @@ export async function generateBrief(args: {
 
   const existing = scheduled ? await getBrief(briefDate, briefType) : null
   if (existing && existing.status === 'GENERATED' && !force) {
+    // Already generated — but the retry firing is also where an email that
+    // failed the first time gets another chance.
+    await deliverBrief(existing.id)
     return { ok: true, brief_id: existing.id, status: 'GENERATED', already: true }
   }
 
@@ -445,6 +518,8 @@ export async function generateBrief(args: {
       })
 
       const ledger = await applyBriefToLedger(saved, content, pack)
+      await deliverBrief(saved.id)
+
       console.log(
         `[brief] ${briefType} ${briefDate} via ${model.id}: ` +
           `${ledger.opened} opened, ${ledger.closed} closed, ${dropped.length} dropped`
@@ -497,6 +572,8 @@ export async function completeBriefFromRawOutput(
   })
 
   const ledger = await applyBriefToLedger(saved, content, pack)
+  await deliverBrief(saved.id)
+
   return {
     ok: true,
     brief_id: brief.id,
