@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { buildContextPack, toCompactPack } from '@/lib/services/contextPackService'
+import { generateBrief } from '@/lib/services/briefService'
 import type { BriefType } from '@/lib/repositories/briefRepo'
 
-// Assembling the pack makes many paced market-data calls; generation adds a
-// large LLM round trip on top.
+// Pack assembly makes many paced market-data calls; generation adds a large
+// LLM round trip on top.
 export const maxDuration = 300
 
 /**
@@ -31,16 +32,20 @@ export async function GET(request: NextRequest) {
   const briefType = parseBriefType(params.get('type')) ?? inferBriefType()
 
   try {
-    const pack = await buildContextPack(briefType)
-
-    // Phase 17 ships the pack only — generation lands in Phase 18. Until then
-    // every call behaves as a dry run so the pack can be inspected first.
-    if (params.get('compact') === '1') {
-      const compact = toCompactPack(pack)
-      return NextResponse.json({ ok: true, dry_run: true, pack: compact })
+    // Inspect exactly what the model would see, without spending a call.
+    if (params.get('dry_run') === '1') {
+      const pack = await buildContextPack(briefType)
+      const out = params.get('compact') === '1' ? toCompactPack(pack) : pack
+      return NextResponse.json({ ok: true, dry_run: true, pack: out })
     }
 
-    return NextResponse.json({ ok: true, dry_run: true, pack })
+    const result = await generateBrief({
+      briefType,
+      modelId: params.get('model'),
+      force: params.get('force') === '1',
+    })
+
+    return NextResponse.json(result, { status: result.ok ? 200 : 500 })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error('[brief] fatal:', message)

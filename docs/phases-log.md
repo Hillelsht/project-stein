@@ -811,3 +811,81 @@ attempt did confirm the degradation path — each failure logged a warning and
 returned `null`/`[]` rather than throwing. Run the dry-run curl after deploy to
 confirm real data:
 `curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/brief?dry_run=1" | jq '.pack.approx_tokens, .pack.counts'`
+
+---
+
+## Phase 18 — briefService: generation, structured output, self-healing ✅
+
+**Goal:** Turn the context pack into a validated, persisted brief with a
+recommendation ledger — and make a failed brief heal itself.
+
+**What was built:**
+
+- `src/lib/services/modelRegistry.ts` — every model that can write a brief, with
+  its `runner`. Two runners exist because the owner's frontier-model access comes
+  from subscriptions, not API keys:
+  - `vercel` — called directly over REST (Gemini 2.5 Pro / Flash, Groq Llama).
+  - `actions` — Claude Opus 5 / Sonnet 5, run headlessly on the owner's Claude
+    subscription inside GitHub Actions (built in Phase 22).
+  Also `DEFAULT_MODEL_ID` and `VERCEL_FALLBACK_CHAIN`.
+- `src/lib/prompts/briefPrompt.ts` — `SYSTEM_PROMPT`, `RESPONSE_SCHEMA`
+  (provider-neutral JSON Schema), `buildBriefPrompt(pack)`, `REPAIR_PROMPT`. The
+  prompt is per-slot: pre-market frames actions "at the open", the evening wrap
+  frames them "at tomorrow's open".
+- `src/lib/services/llmClient.ts` — `callModel`, `callModelForJson`, `stripFences`,
+  `parseJson`. Gemini gets `responseSchema` for enforced structured output; Groq
+  gets `response_format: json_object`.
+- `src/lib/repositories/settingsRepo.ts` — `getSetting`/`setSetting`.
+- `src/lib/services/briefService.ts` — `validateBrief`, `applyBriefToLedger`,
+  `generateBrief`, `completeBriefFromRawOutput` (the entry point the Phase 22
+  Claude worker posts back to).
+- `src/app/api/cron/brief/route.ts` — real generation, with `?dry_run=1` kept.
+  Accepts `?type=`, `?model=`, `?force=1`.
+
+**Key decisions:**
+
+- **Validation is deliberately unforgiving.** A brief is only worth something if
+  its recommendations can be scored later, so anything unscoreable is dropped
+  rather than stored:
+  - An idea whose ticker isn't held and isn't in `tickers_master` — dropped.
+  - **An invalidation on the wrong side of the entry** (a LONG stop *above* the
+    entry zone) — dropped. Such a stop can never trigger, so the position would
+    quietly ride to its horizon no matter how wrong the thesis got. This is the
+    single most important gate in the system.
+  - A holding review for a ticker not actually held, or a `rec_update` naming a
+    recommendation that isn't open — dropped.
+  - `horizon_trading_days` clamped to 1–20, `conviction` to 1–5.
+  Every drop is logged with its reason, so a model that starts drifting is
+  visible rather than silently degrading.
+- **Idempotent, self-healing route.** An existing `GENERATED` brief for a
+  scheduled slot returns `already: true` and does nothing. A missing or `FAILED`
+  brief regenerates and bumps `attempt_count`. That is what lets the cron fire
+  twice per slot — once on time, once as a retry — so a transient provider
+  failure heals with no extra machinery, and a manual retry is one curl.
+- **Provider failure falls through instead of throwing.** `callModel` returns
+  `null` on any failure and the chain tries the next model. In 1.0 a single
+  non-429 error threw and aborted the whole batch.
+- **The Gemini API key moved from the URL to the `x-goog-api-key` header**, so it
+  cannot leak into request logs or error strings (1.0 put it in the query string).
+- **Repair retries send the full prompt.** 1.0's repair path sent only the first
+  500 characters of the original prompt, so a repair silently re-analyzed a
+  truncated input.
+- **Entry basis is snapshotted at creation** (`entry_price` from the pack's last
+  close, `benchmark_entry_price` from SPY), so returns are always measured from a
+  fixed point regardless of when the scoring job first sees the row.
+- **ON_DEMAND briefs bypass the idempotency check**, so the Run Now button can be
+  pressed repeatedly.
+
+**Acceptance verified:**
+- `npm run build` + `tsc --noEmit` clean; `/api/cron/brief` in the route table.
+- `validateBrief` exercised against a crafted model response containing five
+  deliberate defects. Results: hallucinated ticker `ZZZZ` dropped; a LONG idea
+  with invalidation 240 above its 228 entry dropped; a holding review for an
+  unheld `GOOG` dropped; an unknown action `YOLO` dropped; a `rec_update` naming
+  a nonexistent recommendation dropped. Clamping confirmed (horizon 99 → 20,
+  conviction 9 → 5), an empty macro bullet stripped, and the valid SHORT idea
+  (invalidation *above* entry) correctly kept.
+
+**Not verified live:** an end-to-end generation needs `GEMINI_API_KEY` and
+network egress to the provider, neither of which this sandbox has. After deploy:
+`curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/brief?type=premarket"`
