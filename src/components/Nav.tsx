@@ -6,6 +6,7 @@ const LINKS = [
   { href: '/briefs', label: 'Archive' },
   { href: '/scoreboard', label: 'Scoreboard' },
   { href: '/portfolio', label: 'Portfolio' },
+  { href: '/setup', label: 'Setup' },
 ] as const
 
 export default function Nav({ active }: { active: string }) {

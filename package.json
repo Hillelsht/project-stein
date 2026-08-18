@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsc -p tsconfig.test.json && mkdir -p .test-build/node_modules/@ && ln -sfn ../../src/lib .test-build/node_modules/@/lib && node --test '.test-build/tests/*.test.js'",
+    "test:watch": "npm test -- --watch"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.2",

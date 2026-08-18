@@ -77,6 +77,17 @@ function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
 }
 
+/**
+ * Array entries that are not objects. Models occasionally emit `[null]` or a
+ * bare string inside a structured array; without this guard the whole brief
+ * throws on `item.ticker` and one malformed entry costs the owner the run.
+ */
+function asRecord(item: unknown): Record<string, unknown> | null {
+  return typeof item === 'object' && item !== null && !Array.isArray(item)
+    ? (item as Record<string, unknown>)
+    : null
+}
+
 const HOLDING_ACTIONS = new Set(['HOLD', 'TRIM', 'ADD', 'CLOSE', 'WATCH'])
 const REC_DECISIONS = new Set(['MAINTAIN', 'CLOSE', 'TIGHTEN_INVALIDATION'])
 
@@ -134,7 +145,8 @@ export async function validateBrief(
   // ── holdings reviews: must be about a ticker actually held ──
   const holdings_reviews: BriefContent['holdings_reviews'] = []
   for (const item of asArray(raw.holdings_reviews)) {
-    const r = item as Record<string, unknown>
+    const r = asRecord(item)
+    if (!r) continue
     const ticker = cleanString(r.ticker, 10)?.toUpperCase()
     const action = cleanString(r.action, 10)?.toUpperCase()
     const rationale = cleanString(r.rationale)
@@ -157,7 +169,8 @@ export async function validateBrief(
   // ── rec updates: must reference an actually-open recommendation ──
   const rec_updates: BriefContent['rec_updates'] = []
   for (const item of asArray(raw.rec_updates)) {
-    const r = item as Record<string, unknown>
+    const r = asRecord(item)
+    if (!r) continue
     const id = cleanString(r.recommendation_id, 64)
     const decision = cleanString(r.decision, 32)?.toUpperCase()
     const note = cleanString(r.note) ?? ''
@@ -186,7 +199,8 @@ export async function validateBrief(
   const tickerLookup: string[] = []
 
   for (const item of asArray(raw.new_ideas)) {
-    const r = item as Record<string, unknown>
+    const r = asRecord(item)
+    if (!r) continue
     const ticker = cleanString(r.ticker, 10)?.toUpperCase()
     const direction = cleanString(r.direction, 8)?.toUpperCase()
     const thesis = cleanString(r.thesis)
@@ -250,7 +264,16 @@ export async function validateBrief(
   const unknown = [...new Set(tickerLookup)].filter(
     (t) => !ctx.positionTickers.has(t) && !ctx.validTickers(t)
   )
-  const verified = unknown.length > 0 ? new Set(await validateTickerBatch(unknown)) : new Set<string>()
+  // If the ticker lookup fails, treat every unknown symbol as unverified rather
+  // than throwing: an idea we cannot confirm is an idea we must not persist.
+  let verified = new Set<string>()
+  if (unknown.length > 0) {
+    try {
+      verified = new Set(await validateTickerBatch(unknown))
+    } catch (err) {
+      console.warn('[brief] ticker validation unavailable:', (err as Error).message)
+    }
+  }
 
   const new_ideas = ideaCandidates
     .filter((idea) => {
@@ -266,7 +289,8 @@ export async function validateBrief(
   // ── calendar ──
   const calendar: BriefContent['calendar'] = []
   for (const item of asArray(raw.calendar)) {
-    const r = item as Record<string, unknown>
+    const r = asRecord(item)
+    if (!r) continue
     const date = cleanString(r.date, 20)
     const label = cleanString(r.label, 200)
     if (!date || !label) continue

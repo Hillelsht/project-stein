@@ -1284,3 +1284,79 @@ a scoreboard.
 Phase 25 (intraday alerts for holdings/watchlist) remains optional and is not
 started — worth revisiting only once the scoreboard shows the twice-daily briefs
 are actually producing alpha.
+
+---
+
+## Phase 25 — Preflight check + setup page ✅
+
+**Goal:** Make credential setup self-verifying. Without this, a wrong key
+surfaces as a 500 from a cron endpoint hours later.
+
+**What was built:**
+
+- `src/lib/services/preflightService.ts` — checks each integration and reports
+  one of `ok` / `missing` / `error` / `skipped`, each with a **fix hint**:
+  Supabase (queries `briefs`, so it also proves migration 0004 ran), CRON_SECRET,
+  Gemini (lists models — validates the key without spending generation budget),
+  IBKR Flex, Resend (`/domains` — a free authenticated read; sends nothing),
+  Yahoo, GitHub dispatch (also reports if the worker workflow is disabled), VAPID.
+- `src/app/api/preflight/route.ts` — authenticated by **session OR CRON_SECRET**,
+  so it works from a terminal before the Supabase user exists.
+- `src/app/setup/page.tsx` — the same checks as a page, split required/optional.
+
+**Key decisions:**
+
+- **Cheap by default.** No LLM generation, no email sent, and the IBKR statement
+  request (~45s) is opt-in via `?deep=1`. Everything else is a sub-second
+  credential validation.
+- **Every failure carries its remedy**, not just its symptom — e.g. a Supabase
+  "relation does not exist" says to run migration 0004, rather than reporting a
+  raw Postgres error.
+- **`skipped` counts as ready.** Credentials being present with only the slow
+  live call deferred should not block the "ready" verdict.
+
+**Verified:** run with no credentials at all — correctly reported 7 missing and
+1 error, each with the right fix line, and `ready: false`.
+
+---
+
+## Phase 26 — Test suite ✅
+
+**Goal:** Convert the ad-hoc verifications from phases 16–20 into committed
+regression protection.
+
+**What was built:** `tests/` with **39 tests** covering the trading calendar,
+RSI/SMA/technicals, Flex statement parsing, the brief validation gates, scoring
+maths, and email rendering. Run with `npm test`.
+
+**Zero new dependencies** — Node's built-in `node:test` over `tsc` output. `tsc`
+does not rewrite path aliases, so the pretest step symlinks
+`.test-build/node_modules/@/lib → .test-build/src/lib`, letting ordinary Node
+resolution handle `@/`. This avoids adding jest, vitest, tsx, or a loader.
+
+**It immediately found a real bug.** A model emitting `[null]` inside a
+structured array — which they occasionally do — made `validateBrief` throw on
+`item.ticker`, failing the entire brief over one malformed entry. Fixed with an
+`asRecord()` guard on all four loops. Also hardened `validateTickerBatch` so a
+ticker-DB outage drops the unverifiable idea instead of throwing.
+
+**Not covered:** anything needing network or database access. Those are verified
+against live services by `/api/preflight` and the README runbook.
+
+---
+
+## Phase 27 — Demo seed ✅
+
+**Goal:** Let the owner judge the UI before any credential exists.
+
+**What was built:** `src/lib/services/demoService.ts`, `POST`/`DELETE
+/api/demo`, and a **Load sample data** control on `/setup`. Seeds one brief,
+three positions, and five recommendations, all tagged and fully removable.
+
+**Key decision — the sample ledger is deliberately mixed:** an open winner, a
+closed winner that beat SPY, **a winner that lagged SPY**, a stopped-out short,
+and one closed early by a later brief. A demo showing only wins would
+misrepresent what the scoreboard is for; this one renders a realistic 60% hit
+rate alongside honest alpha.
+
+**Acceptance:** build + `tsc` clean, all 39 tests pass, new routes present.
