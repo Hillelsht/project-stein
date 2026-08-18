@@ -11,9 +11,15 @@ Migrations (applied by hand in the Supabase SQL editor):
 | `0003_signal_outcomes_unique_signal_id.sql` | `UNIQUE (signal_id)` bugfix for the validate cron's upsert |
 | `0004_stein2_schema.sql` | Stein 2.0: `positions`, `briefs`, `recommendations`, `settings` |
 
-**14 tables total.** Ten from 1.0, four from 2.0. Of the 1.0 set,
-`ai_analyses`, `market_signals`, and `signal_outcomes` are **frozen** after the
-Phase 23 cutover — retained as read-only history, never written to again.
+**14 tables total.** Ten from 1.0, four from 2.0.
+
+Four 1.0 tables are **frozen** as of the Phase 23 cutover: `ai_analyses`,
+`market_signals`, `signal_outcomes`, and `push_history`. Nothing writes to them,
+and their repositories were deleted in Phase 24 — so they are unreachable from
+application code by design. They are kept because the rows are a real record of
+what 1.0 did, and dropping them saves nothing on the free tier. Read them in the
+Supabase SQL editor if you ever want the history; do not add code that depends
+on them.
 
 ## Stein 1.0 tables
 

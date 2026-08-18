@@ -34,17 +34,6 @@ export async function saveArticle(article: NewArticle): Promise<Article | null> 
   return data as Article
 }
 
-export async function getArticleByUrl(url: string): Promise<Article | null> {
-  const db = createServiceClient()
-  const { data, error } = await db
-    .from('articles')
-    .select('*')
-    .eq('url', url)
-    .maybeSingle()
-  if (error) throw error
-  return data as Article | null
-}
-
 export async function getUnanalyzedArticles(limit: number): Promise<Article[]> {
   const db = createServiceClient()
   const { data, error } = await db

@@ -1,143 +1,131 @@
-# Project Stein — Data Pipeline
+# Project Stein — Pipeline
 
-## Why a pre-filter pipeline exists
+## The inversion
 
-Raw RSS feeds produce 5,000–10,000 articles/day. Gemini free tier allows 1,000 LLM calls/day (we cap at 800). Without filtering, the budget is exhausted in minutes. The pipeline's job is to reduce that fire hose to the ~50–150 articles/day that actually matter.
+Stein 1.0: **many small LLM calls, no context.** Every article that survived a
+regex filter got its own Gemini Flash-Lite call — up to 800 a day — asking for a
+sentiment score on 4,000 truncated characters.
 
-## End-to-end flow
-
-```
-RSS item arrives
-     │
-     ▼
-[Ingest] rssService.fetchSource()
-  - Parse RSS/Atom with rss-parser
-  - Set SEC User-Agent header (required by SEC)
-  - Save to articles table (url UNIQUE prevents exact dups at DB level)
-  - Extract 8-K item codes from SEC feed titles/summaries into raw_content
-     │
-     ▼
-[Filter Stage 1] Ticker extraction
-  - Regex: /(?:^|[^A-Z])\$?([A-Z]{1,5})(?:[^A-Z]|$)/g
-  - Cross-reference every candidate against tickers_master
-  - Blocklist removes common false positives: CEO, CFO, SEC, FDA, USA, GDP, etc.
-  - No valid ticker → article can still proceed if Stage 2 matches (macro news)
-     │
-     ▼
-[Filter Stage 2] Material keyword filter
-  - Article must contain at least one keyword (case-insensitive, word-boundary):
-    M&A: acquire, merger, buyout, takeover, divestiture, spinoff
-    Earnings: EPS, guidance, beat, miss, raised, lowered, warning, preannounce
-    Regulatory: FDA, approval, recall, 510(k), phase 1/2/3, PDUFA, breakthrough
-    Legal: lawsuit, settlement, SEC charges, fraud, investigation, class action
-    Leadership: resigns, fired, appointed, steps down, terminated
-    Capital: buyback, dividend, offering, bankruptcy, Chapter 11, 13D, 13G, activist
-    Operations: contract awarded, patent granted, joint venture, license agreement
-  - Fail → reject reason: "no_material_keyword"
-     │
-     ▼
-[Filter Stage 3] SEC 8-K item filter (SEC source only)
-  - Accept only filings containing material items:
-    1.01 Material Definitive Agreement
-    1.02 Termination of Agreement
-    1.03 Bankruptcy
-    2.01 Completion of Acquisition
-    2.02 Results of Operations (earnings)
-    3.01 Notice of Delisting
-    4.02 Non-Reliance on Financial Statements
-    5.02 Officer Departure / Compensation
-    7.01 Regulation FD
-    8.01 Other Events
-  - Drop filings with only items 5.03, 5.07, 9.01 (immaterial)
-  - Fail → reject reason: "immaterial_sec_item"
-     │
-     ▼
-[Filter Stage 4] Deduplication
-  - hash = SHA-256(normalized_title + "|" + raw_content[:200])
-  - normalized_title = title.lowercase().replace(/[^a-z0-9 ]/g, '').trim()
-  - Check dedup_hashes for past 48 hours
-  - Hit → reject reason: "duplicate"
-  - Miss → save hash to dedup_hashes
-     │
-     ▼
-[Filter Stage 5] Watchlist priority
-  - If extracted tickers ∩ any user's watchlist → mark high-priority (always send to LLM)
-  - Else → low-priority (only send if daily budget allows)
-     │
-     ▼
-[Filter Stage 6] Daily LLM budget check
-  - countAnalysesToday() >= 800 → reject reason: "daily_budget"
-  - Budget resets at midnight UTC
-     │
-     ▼
-[LLM] llmService.analyzeArticle()
-  1. Build prompt from sentimentPrompt template (title + body truncated to 4,000 chars)
-  2. Call Gemini 2.5 Flash-Lite (REST API, responseMimeType: application/json)
-  3. On 429 or 5xx → fall back to Groq (Llama 3.3 70B)
-  4. On both fail → log, skip article
-  5. JSON.parse() — one retry with repair prompt on failure
-  6. Validate each ticker in response against tickers_master → drop hallucinations
-  7. Clamp sentiment_score and confidence to 0–10
-  8. Uppercase sentiment → default NEUTRAL if invalid
-  9. Save ai_analyses row (with token counts for budget tracking)
-  10. Save market_signals row(s) for each valid ticker
-  11. If score ≥ 8 AND ticker in any user's watchlist → send push notification
-     │
-     ▼
-[Validation] validationService (runs daily at 02:00 UTC)
-  - For each signal from past 10 days where price horizons are still null:
-    1. Fetch historical prices via yahoo-finance2
-    2. Compute return at 1h, 1d, 3d, 7d horizons (market time, not wall-clock)
-    3. Upsert into signal_outcomes
-  - After 60+ days of data: /stats page shows whether signals actually have edge
-```
-
-## LLM prompt (verbatim system prompt)
+Stein 2.0: **two large LLM calls, maximum context.** The regex filter survives
+as the *news selector*; nothing else about 1.0's LLM stage does. Twice a day one
+frontier-model call receives the whole picture and returns decisions.
 
 ```
-You are a financial news analyst. Output ONLY a valid JSON object with these exact fields:
-
-{
-  "summary": "Exactly 2 sentences summarizing the event. No editorializing.",
-  "economic_impact": "1-2 sentences on sector or macro impact. If none, write 'None'.",
-  "tickers": ["TICKER1", "TICKER2"],
-  "sentiment": "BULLISH" | "BEARISH" | "NEUTRAL",
-  "sentiment_score": 0,
-  "confidence": 0,
-  "material": true
-}
-
-Rules:
-- tickers: valid US-listed symbols only. If not confident, OMIT rather than guess.
-- sentiment_score: 0-10. 10 = major market-moving event (earnings miss >5%, M&A, FDA decision, bankruptcy).
-- confidence: 0-10. How sure you are about the direction.
-- material: true only if news typically moves stock price.
-- sentiment applies to PRIMARY ticker.
-- Do NOT include any text outside the JSON.
-- Do NOT wrap in markdown code fences.
-
-ARTICLE TITLE: {title}
-ARTICLE BODY: {body_truncated_4000_chars}
+1.0:  article → filter → LLM → score        (×800/day, no memory, no portfolio)
+2.0:  news + positions + technicals + macro + open ideas → LLM → decisions  (×2/day)
 ```
 
-## LLM response validation
+## Ingest → select (news, no model)
 
-After every LLM call, before any DB insert:
-1. `JSON.parse()` — one retry with repair prompt on failure; skip on second failure
-2. Each `tickers[]` entry checked against `tickers_master` — hallucinated symbols silently dropped
-3. `sentiment_score`, `confidence` → clamped to integers 0–10
-4. `sentiment` → uppercase; must be BULLISH/BEARISH/NEUTRAL; else NEUTRAL
-5. If no valid tickers AND `material = false` → save `ai_analyses` row but skip `market_signals` (keeps audit trail)
-
-## Push notification trigger
-
-Conditions (all must be true):
-- `sentiment_score >= 8`
-- `ticker_symbol` is in at least one user's watchlist
-- User has not received > 10 pushes today
-- Same ticker was not pushed to this user in the past 30 minutes
-
-Payload:
-```json
-{ "title": "TSLA · BULLISH · 9/10", "body": "2-sentence summary...", "url": "/?highlight={signal_id}" }
 ```
+RSS (SEC EDGAR 8-K, PR Newswire, Yahoo Finance)
+  → rssService.fetchAndStoreAll()      articles.url UNIQUE dedupes at DB level
+  → /api/cron/select
+      Stage 1  ticker extraction, validated against tickers_master
+      Stage 2  material keyword regex        → reject no_material_keyword
+      Stage 3  SEC 8-K item allowlist        → reject immaterial_sec_item
+      Stage 4  SHA-256 dedup, 48h window     → reject duplicate
+      → articles.passed_filter = true
+```
+
+**The dedup hash is saved last, after every rejection stage.** 1.0 saved it
+before its LLM budget check, so a budget-dropped article left its hash behind
+and that story could never be seen again — the news was lost, not deferred.
+There is no budget stage now, but the invariant stands: a hash must only ever
+record something that actually passed.
+
+## The context pack
+
+`contextPackService.buildContextPack(briefType)` assembles everything the model
+is allowed to reason from. Target ≤ ~25K tokens; `approx_tokens` is reported so
+the budget is observable.
+
+| Section | Source |
+|---|---|
+| `macro` | SPY, QQQ, ^VIX, ^TNX — last + 1d change |
+| `positions` | `positions` table + technicals + P&L% + next earnings |
+| `watchlist` | watched tickers not already held (no duplicate token spend) |
+| `open_recommendations` | every OPEN ledger row with live P&L, **distance to invalidation**, trading days left |
+| `news` | last 24h `passed_filter = true`, ranked, capped at 60, 240-char snippets |
+| `earnings_calendar` | next 14 days for held + watched tickers |
+
+**Technicals are computed in code, never asked of the model:** Wilder RSI(14),
+SMA 20/50/200 and % distance, 52-week range proximity, volume vs 30-day average,
+1d/5d/1mo changes. An LLM cannot reliably compute an RSI from a list of closes,
+but it reasons well about "RSI 28, 12% below the 50-day, earnings in 3 days".
+
+**News ranking:** touches a holding (3) > touches a watchlist or open-idea name
+(2) > general market (1); newest first within a tier.
+
+**Open recommendations are in the pack on purpose.** The model must confront its
+own prior calls before proposing new ones — that is what makes the ledger
+self-correcting instead of an ever-growing pile of forgotten ideas.
+
+## Generation
+
+Two runners, because the owner's frontier-model access is a subscription rather
+than an API key:
+
+| Runner | Models | Path |
+|---|---|---|
+| `vercel` | Gemini 2.5 Pro / Flash, Groq Llama | REST from the brief route, inline (~30–60s) |
+| `actions` | Claude Opus 5 / Sonnet 5 | `brief-worker.yml` runs `claude -p` on the owner's Pro/Max subscription, POSTs back (~2–3 min) |
+
+Fallback chain on failure: chosen model → Gemini Pro → Gemini Flash → Groq
+(compact pack, since Groq's free TPM cannot fit the full one). A provider error
+returns `null` and moves to the next model; 1.0 threw and aborted the batch.
+
+## Validation — the gate that matters
+
+`briefService.validateBrief` refuses to store anything that could not later be
+scored. Every drop is logged with its reason.
+
+| Rule | Why |
+|---|---|
+| Idea ticker must be held or in `tickers_master` | hallucinated symbols |
+| **Invalidation must be on the correct side of the entry** (below for LONG, above for SHORT) | a wrong-side stop can *never* trigger, so a broken thesis would ride to its horizon unchallenged |
+| Holding review must name a current position | commentary about stock you don't own |
+| `rec_update` must reference an actually-OPEN recommendation | phantom updates |
+| `horizon_trading_days` → 1–20, `conviction` → 1–5 | clamped |
+| Parse failure | one repair retry with the **full** prompt, then FAILED |
+
+## Ledger and scoring
+
+New ideas become `recommendations` rows with `entry_price` and
+`benchmark_entry_price` (SPY) snapshotted at creation, so returns are always
+measured from a fixed basis.
+
+Nightly (`02:00 UTC Tue–Sat`), `scoringService`:
+
+1. Prices every OPEN row and SPY (one fetch per distinct ticker).
+2. Computes direction-aware return — a SHORT that falls is a gain.
+3. **Close-based invalidation** → `CLOSED_INVALIDATED`. Intraday wicks are
+   deliberately ignored: free EOD data has no reliable intraday series, and
+   closing on a wick that recovered would record exits the owner never took.
+4. Past `horizon_date` → `CLOSED_HORIZON`.
+5. **A missing price skips the row** rather than closing it — a data outage must
+   never auto-close a trade or freeze a stale return as final.
+
+**Alpha vs SPY is the headline metric, not hit rate.** A hit rate alone flatters
+any system in a rising market. Only closed rows count; open ones are excluded so
+unrealized winners cannot inflate the record while losers quietly close.
+
+## Delivery
+
+Email (Resend) + Web Push, both individually try/caught — a brief that generated
+correctly but could not be emailed is still a good brief, and the retry cron
+firing re-attempts only what has not succeeded. The subject line carries the
+decision (`Stein Pre-market · 2026-08-17 · 1 new idea, 2 position actions`, or
+`· no action`) so the notification alone is triageable.
+
+## Self-healing
+
+Each brief slot fires **twice** (`0 11` + `45 11`; `30 21` + `15 22` UTC). The
+second pass carries `heal=1`:
+
+- A `GENERATED` brief → no-op, but delivery is re-attempted.
+- A missing or `FAILED` brief → regenerated.
+- Anything stuck `PENDING` > 30 min (the Actions worker never reported) →
+  regenerated inline with the Gemini chain.
+
+So a transient provider outage costs a delay, not a brief.

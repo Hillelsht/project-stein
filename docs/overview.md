@@ -2,68 +2,87 @@
 
 ## What it is
 
-A personalized financial news filter and signal tracker for a small family of traders (≤5 users). It ingests free public RSS feeds and SEC filings, uses an LLM to produce structured sentiment signals, and tracks whether those signals correlate with actual price movement over time.
+A private, portfolio-aware trading brief. Twice each trading day it reads the
+owner's actual IBKR positions, computes technicals, gathers filtered news and
+the calendar, and asks a frontier model one question: **what should I open or
+close today?**
+
+Every trade idea it produces is written to a ledger with an entry price, an
+invalidation level, and a horizon — then priced nightly against SPY. The
+scoreboard is the point: it answers "has any of this actually worked?" with a
+number rather than a feeling.
 
 ## What it is NOT
 
-- Not a tool to beat HFT firms. RSS feeds are seconds-to-minutes behind co-located pipelines.
+- Not a signal feed. Stein 1.0 was, and it was not useful — see below.
+- Not a tool to beat HFT firms. Free EOD data is minutes-to-hours behind.
 - Not licensed financial advice.
-- Not an auto-trader or broker integration.
+- Not an auto-trader. It reads the broker; it never sends an order.
+
+## Why 2.0 exists
+
+Stein 1.0 scored individual news articles with ~800 small LLM calls a day and
+showed the results as a feed. It failed for five reasons, all structural:
+
+1. **Per-article sentiment scores are not decisions.** "BMY · NEUTRAL · 2/10"
+   tells you nothing about what to do.
+2. **Tiny calls on truncated text produce shallow output.** Multi-ticker
+   articles only ever scored their first ticker.
+3. **Magic-link auth** made every visit a chore.
+4. **It never knew what the owner owned** — no positions, no P&L, no risk.
+5. **It died silently.** GitHub disables scheduled workflows after 60 days of
+   repo inactivity; the cron stopped and nothing ingested for months.
+
+2.0 inverts the pipeline: **few large LLM calls with rich context** instead of
+many small ones with none, delivered to the owner instead of waiting to be
+visited, and held accountable by a scoreboard.
 
 ## Tech stack
 
 | Layer | Choice | Reason |
 |---|---|---|
-| Frontend + API | Next.js 15 (App Router) + TypeScript | Familiar, good tooling |
-| Styling | Tailwind CSS v4 | Utility-first |
+| Frontend + API | Next.js 16 (App Router) + TypeScript | Familiar; `src/proxy.ts` replaces middleware in v16 |
+| Styling | Tailwind CSS v4 | Utility-first, dark-only |
 | Database | Supabase (Postgres) free tier | Free, managed, auth included |
 | Hosting | Vercel Hobby | Free, native Next.js |
-| Cron | GitHub Actions | Vercel Hobby only allows 1 cron/day; GH Actions is free and allows every 5 min |
-| Primary LLM | Google Gemini 2.5 Flash-Lite | Best free tier: 15 RPM, 1,000 RPD, 250K TPM |
-| Fallback LLM | Groq (Llama 3.3 70B) | ~1,000 RPD free, fast |
-| Price data | `yahoo-finance2` npm package | Free, no API key |
-| Ticker master | NASDAQ Trader CSVs | Free, refreshed weekly |
-| Push | Web Push API + service worker | Free, works on iOS 16.4+ PWAs |
+| Cron | GitHub Actions | Free, minute-level; Vercel Hobby allows 1 cron/day |
+| Brief models | Claude Opus 5 / Sonnet 5 (owner's subscription, via Actions), Gemini 2.5 Pro/Flash (free tier), Groq (fallback) | Frontier quality at zero marginal cost |
+| Portfolio | IBKR Flex Web Service | Free, token-based, no gateway process |
+| Price data | `yahoo-finance2` | Free, no API key |
+| Email | Resend free tier | 100/day is 50× headroom |
+| Push | Web Push API + service worker | Free, works in installed PWAs |
 
-## High-level architecture
+## Architecture
 
 ```
-GitHub Actions (cron)
-  └─ every 10 min (market hours) → hits Next.js API routes on Vercel
-       ├─ /api/cron/ingest   → rssService → articles table
-       ├─ /api/cron/analyze  → filterService → llmService → ai_analyses + market_signals
-       ├─ /api/cron/validate → priceService + validationService → signal_outcomes
-       └─ /api/cron/refresh-tickers → tickerMasterService → tickers_master
+GitHub Actions (one job, one routing table)
+  ├─ every 30 min (market hours)  → /api/cron/ingest  → RSS → articles
+  │                                → /api/cron/select  → regex filter, NO LLM
+  ├─ 10:30 & 21:00 UTC weekdays   → /api/cron/sync-positions → IBKR Flex
+  ├─ 11:00 & 21:30 UTC weekdays   → /api/cron/brief    → the brief
+  │     (+ 11:45 / 22:15 retry passes that also heal stranded briefs)
+  ├─ 02:00 UTC Tue–Sat            → /api/cron/score    → price the ledger
+  ├─ 03:00 UTC daily              → /api/cron/cleanup
+  ├─ 04:00 UTC Sunday             → /api/cron/refresh-tickers
+  └─ monthly                      → keepalive (beats the 60-day auto-disable)
 
-Supabase (Postgres)
-  └─ all persistent state
-
-Next.js Frontend (Vercel)
-  ├─ /           → signal feed (filtered to watchlist)
-  ├─ /watchlist  → manage tickers
-  └─ /stats      → validation results (does our LLM actually work?)
+Brief generation
+  contextPackService  → positions + technicals + macro + news + open ideas
+        │
+        ├─ vercel runner  → Gemini/Groq REST, inline (~30–60s)
+        └─ actions runner → brief-worker.yml runs `claude -p` on the
+                            owner's subscription, POSTs the result back
+        │
+        ▼
+  briefService.validateBrief  → drops anything unscoreable
+        ▼
+  briefs + recommendations (ledger)  →  email (Resend) + Web Push
 ```
 
-## The critical pipeline design: pre-filter BEFORE LLM
+## Success criteria
 
-Raw feeds produce 5,000–10,000 articles/day. Gemini free tier allows 1,000 LLM calls/day. Without pre-filtering, the budget is blown before 10am.
-
-The pipeline (see `docs/pipeline.md` for detail):
-1. Ticker regex extraction + validation against tickers_master
-2. Material keyword filter (M&A, earnings, FDA, legal, leadership, capital, operations)
-3. SEC 8-K item code filter (only material items)
-4. Deduplication (SHA-256 hash, 48hr window)
-5. Watchlist priority (watchlist matches always survive)
-6. Daily LLM budget check (≤800 calls/day)
-7. LLM call → response validation → insert to DB
-8. Push notification if score ≥ 8 and ticker is watched
-
-This pipeline reduces raw articles by ~85–95% before any LLM call.
-
-## MVP success criteria
-
-1. System runs end-to-end without manual intervention for 30 consecutive days.
-2. After 60 days: can state with numbers whether Bullish score-8+ signals have positive mean 1-day return.
-3. False-positive ticker rate < 5%.
-4. Push notifications arrive within 2 minutes of source feed update.
-5. Monthly infrastructure cost: $0.
+1. Runs unattended for 30 consecutive trading days.
+2. After 60 days, the scoreboard can state **average alpha vs SPY** across
+   closed recommendations — positive or negative, but a real number.
+3. The owner reads the brief from email/push and rarely needs to open the site.
+4. Monthly infrastructure cost stays at **$0**.

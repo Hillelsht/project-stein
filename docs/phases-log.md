@@ -419,7 +419,6 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 **Commit:** `phase-11: PWA + Web Push (manifest, sw, pushService, push_history, subscribe/unsubscribe routes, PushToggle)`
 
-_Not yet started._
 
 ---
 
@@ -454,7 +453,6 @@ _Not yet started._
 
 **Commit:** `phase-12: stats page (validation dashboard with window selector + bucket table)`
 
-_Not yet started._
 
 ---
 
@@ -1213,3 +1211,76 @@ silently break — the two failures that between them killed Stein 1.0.
 
 **Not verified live:** the first re-enable after months of inactivity is manual
 (Actions tab → workflow → Enable). Pushing this commit also resets the clock.
+
+---
+
+## Phase 24 — Ops v2, dead-code cleanup, docs rewrite ✅
+
+**Goal:** Health checks that describe the pipeline that actually exists, a
+codebase with no 1.0 remnants, and docs that can be trusted as the project's
+operating system.
+
+**What was built:**
+
+- `src/lib/services/opsService.ts` — rewritten. New checks:
+  - Last source poll > 90 min → the cron may be disabled.
+  - **Expected-brief check** — on a trading day past the slot's grace hour
+    (12:00 UTC pre-market, 23:00 UTC evening), a brief that is missing, `FAILED`,
+    still `PENDING`, or generated-but-not-emailed is an issue.
+  - Positions synced > 30h ago → the brief may be reasoning over stale holdings.
+  - Open recommendations unpriced > 48h → scoring may not be running.
+  - LLM-budget metrics removed; there is no per-article budget any more.
+- `src/app/api/health/route.ts` and `src/components/OpsBanner.tsx` needed **no
+  changes** — both consume only `status` and `issues`, so the rewrite passed
+  straight through. That is the abstraction working.
+
+**Dead code deleted** (each verified to have zero callers before removal):
+
+| Removed | Why |
+|---|---|
+| `signalRepo.ts`, `analysisRepo.ts`, `outcomeRepo.ts`, `pushHistoryRepo.ts` | their tables are frozen 1.0 history |
+| `priceService.ts` | scoring uses `marketDataService.getLastClose`; the only remaining reference to `getClosingPriceAt` was internal |
+| `articleRepo.getArticleByUrl` | never called |
+| `pushRepo.getSubscriptionsForUser` / `getSubscriptionsForUsers` | single-user app; briefs push to every device |
+| `watchlistRepo.getUsersWatchingTicker` | only existed for per-signal push |
+
+**Docs rewritten:**
+
+- `docs/overview.md` — brief-centric, with an explicit "why 2.0 exists" section
+  listing the five structural reasons 1.0 failed.
+- `docs/pipeline.md` — the inversion (many small calls → two large ones), the
+  context pack, the validation gate, scoring, delivery, and self-healing.
+- `docs/code-structure.md` — new folder map, the eight hard rules, the full cron
+  table, and the env-var table.
+- `docs/data-model.md` — documented the four frozen tables and stated plainly
+  that they are unreachable from code by design.
+- `README.md` — replaced the untouched `create-next-app` boilerplate with what
+  Stein is, the env-var table, one-time setup, and an **ops runbook** (health,
+  dry-run, force a brief, heal stuck briefs, re-enable the cron, rotate the Flex
+  token, run any endpoint by hand).
+- `CLAUDE.md` — hard rules updated: the 800-calls/day budget rule became
+  "≤2 large brief calls per scheduled day, never reintroduce a per-article
+  call"; added the never-persist-an-unscoreable-recommendation rule and the
+  frozen-tables rule; corrected "9 DB tables" to 14.
+- `docs/phases-log.md` — removed the **2** leftover `_Not yet started._` lines
+  that had been sitting directly under the Phase 11 and 12 ✅ headers since 1.0,
+  contradicting their own entries.
+
+**Acceptance verified:**
+- Clean `npm run build` and `tsc --noEmit` with the entire 1.0 data layer removed.
+- `grep` confirms no remaining references to the deleted modules.
+
+---
+
+# Stein 2.0 — status
+
+Phases 14–24 complete. The system now: syncs the portfolio, selects news without
+any model call, builds a context pack, generates a brief twice a day (on a
+frontier model via subscription, with a free-tier fallback chain), validates it
+so nothing unscoreable is stored, writes a recommendation ledger, delivers by
+email and push, prices the ledger nightly against SPY, and surfaces all of it on
+a scoreboard.
+
+Phase 25 (intraday alerts for holdings/watchlist) remains optional and is not
+started — worth revisiting only once the scoreboard shows the twice-daily briefs
+are actually producing alpha.

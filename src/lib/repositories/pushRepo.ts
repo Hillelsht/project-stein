@@ -16,16 +16,6 @@ export type NewPushSubscription = {
   auth: string
 }
 
-export async function getSubscriptionsForUser(userId: string): Promise<PushSubscription[]> {
-  const db = createServiceClient()
-  const { data, error } = await db
-    .from('push_subscriptions')
-    .select('*')
-    .eq('user_id', userId)
-  if (error) throw error
-  return data as PushSubscription[]
-}
-
 /**
  * Every subscription in the system. Stein 2.0 is single-user, so a brief
  * notification goes to every registered device rather than being scoped by user.
@@ -33,17 +23,6 @@ export async function getSubscriptionsForUser(userId: string): Promise<PushSubsc
 export async function getAllSubscriptions(): Promise<PushSubscription[]> {
   const db = createServiceClient()
   const { data, error } = await db.from('push_subscriptions').select('*')
-  if (error) throw error
-  return data as PushSubscription[]
-}
-
-export async function getSubscriptionsForUsers(userIds: string[]): Promise<PushSubscription[]> {
-  if (userIds.length === 0) return []
-  const db = createServiceClient()
-  const { data, error } = await db
-    .from('push_subscriptions')
-    .select('*')
-    .in('user_id', userIds)
   if (error) throw error
   return data as PushSubscription[]
 }
