@@ -419,7 +419,6 @@ This file is updated at the end of every phase. It is the authoritative record o
 
 **Commit:** `phase-11: PWA + Web Push (manifest, sw, pushService, push_history, subscribe/unsubscribe routes, PushToggle)`
 
-_Not yet started._
 
 ---
 
@@ -454,7 +453,6 @@ _Not yet started._
 
 **Commit:** `phase-12: stats page (validation dashboard with window selector + bucket table)`
 
-_Not yet started._
 
 ---
 
@@ -511,3 +509,854 @@ Two changes:
 - `src/lib/repositories/articleRepo.ts` — removed the now-unused `getLatestFetchedAt()` (per the no-dead-code rule).
 
 The new metric measures cron health independent of news volume, which is what we actually want to alert on.
+
+---
+
+# Stein 2.0 — Portfolio-aware decision briefs
+
+Stein 1.0 (Phases 0–13) shipped a per-article sentiment feed. It was judged not
+valuable: per-article scores are not tradeable, the LLM economics were wrong
+(800 tiny Flash-Lite calls on truncated snippets), auth friction was high, and
+the system was blind to the owner's actual portfolio. The GitHub Actions cron
+had also been auto-disabled after 60 days of repo inactivity, so the pipeline
+had been dead for months.
+
+Stein 2.0 inverts the pipeline: **few large LLM calls with rich context**
+instead of many small calls with none. The product is a twice-daily,
+portfolio-aware decision brief (plus on-demand runs) delivered by email and
+push, where every recommendation is logged, priced against SPY, and scored on
+an honest scoreboard.
+
+---
+
+## Phase 14 — Auth rework: password sign-in, one protection layer ✅
+
+**Goal:** Kill magic links. Sign in with a password once and stay signed in;
+protect every page in exactly one place.
+
+**What was built:**
+
+- `src/app/(auth)/login/page.tsx` — rewritten. `signInWithPassword` replaces
+  `signInWithOtp`; the "check your email" state is gone. On success:
+  `router.replace('/')` + `router.refresh()` so the proxy sees the new session
+  cookie before the redirect lands. Auth errors are rendered inline (1.0
+  declared a `searchParams.error` prop and never read it, so expired links
+  showed a blank form).
+- `src/proxy.ts` — inverted from an allowlist of protected paths to a
+  `PUBLIC_PATHS` denylist: any path that is not `/login` redirects to `/login`
+  when unauthenticated; authenticated users on `/login` bounce to `/`. Matcher
+  now also excludes `manifest.json`, `sw.js`, and `icon.svg` — PWA assets must
+  load without a session or the service worker fails to register.
+- Deleted `src/app/auth/callback/route.ts` (and the `src/app/auth/` directory).
+  The dual PKCE / token-hash handling existed only to absorb Supabase email
+  template differences; with password auth there is no callback at all.
+- `src/app/page.tsx`, `src/app/watchlist/page.tsx`, `src/app/stats/page.tsx` —
+  removed the per-page `redirect('/login')` blocks. Pages still call
+  `getUser()` where they need the user id and `return null` defensively, but
+  the proxy is now the single source of auth truth.
+
+**Key decisions:**
+
+- **Session longevity is a dashboard setting, not code.** JWT expiry stays 1h;
+  refresh tokens do not expire as long as "time-boxed sessions" and "inactivity
+  timeout" are off in Supabase → Authentication → Sessions. The proxy's
+  `getUser()` call refreshes the session cookie on every request, so any visit
+  inside the refresh window keeps the session alive indefinitely.
+- **No signup, no password reset UI.** Single-user app: the password is set once
+  from the Supabase dashboard, and dashboard reset is the recovery path. Adding
+  a reset flow would re-introduce the transactional-email dependency that made
+  magic links painful.
+- **`return null` instead of `redirect()` in pages.** The proxy already
+  guarantees a user; the check is defence-in-depth for a misconfigured matcher,
+  and returning null avoids a second redirect hop.
+
+**Manual steps required by the owner:**
+1. Supabase dashboard → Authentication → Users → set a password on the account.
+2. Supabase dashboard → Authentication → Sessions → confirm "time-boxed
+   sessions" and "inactivity timeout" are disabled.
+
+**Acceptance verified:**
+- `npm run build` clean. Route table no longer contains `/auth/callback`;
+  `/login` still prerenders as static.
+- TypeScript clean (`tsc --noEmit`).
+
+**Not verified live:** actual sign-in requires the password to be set in the
+Supabase dashboard first (manual step above).
+
+---
+
+## Phase 15 — Schema: positions, briefs, recommendations, settings ✅
+
+**Goal:** Every 2.0 table exists. The 1.0 pipeline keeps running untouched.
+
+**What was built:**
+
+- `supabase/migrations/0004_stein2_schema.sql` — four tables, four enums, RLS.
+
+| Table | Purpose |
+|---|---|
+| `positions` | The portfolio the briefs reason over |
+| `briefs` | One row per generated (or attempted) brief |
+| `recommendations` | The accountability ledger — one row per trade idea |
+| `settings` | Key/value owner preferences (e.g. `default_brief_model`) |
+
+- `.env.example` — added the 2.0 block: `IBKR_FLEX_TOKEN`, `IBKR_FLEX_QUERY_ID`,
+  `RESEND_API_KEY`, `BRIEF_RECIPIENT_EMAIL`, `BRIEF_FROM_EMAIL`,
+  `GITHUB_DISPATCH_TOKEN`, `GITHUB_REPO`.
+- `docs/data-model.md` — documented the new tables and **fixed the long-standing
+  count error**: the doc claimed "9 tables" while the DB had 10 (`push_history`
+  from `0002` was never documented). Now 14, with the migration list and the
+  frozen-table note spelled out.
+
+**Key decisions:**
+
+- **`recommendations` carries its own outcome columns; no `recommendation_outcomes`
+  table.** 1.0's `signal_outcomes` existed because each signal fanned out into
+  four horizons (1h/1d/3d/7d). A recommendation has exactly one lifecycle: the
+  nightly job overwrites `current_*` while OPEN and stamps `closed_*` once. A
+  join table would add nothing and make the scoreboard a two-table query.
+- **Per-holding reviews live in `briefs.content`, not a table.** HOLD/TRIM/ADD/
+  WATCH lines are commentary about existing positions, not new bets — they have
+  no entry price, no invalidation, and nothing to score. Only new trade ideas
+  enter the ledger, which keeps the scoreboard honest: it measures what the
+  model actually proposed, not how often it said "hold".
+- **Partial unique index on `briefs`** — `(brief_date, brief_type) WHERE
+  brief_type IN ('PREMARKET','EVENING')`. This is the idempotency key that lets
+  the brief cron fire twice per slot (on time + retry) without duplicating a
+  row, while leaving `ON_DEMAND` runs unconstrained so the Run Now button can be
+  pressed repeatedly.
+- **`PENDING` status from day one.** The Claude-on-subscription path (Phase 22)
+  is asynchronous: the app creates the row, a GitHub Actions worker fills it in.
+  Adding the state now avoids a status migration later.
+- **`invalidation_price` is NOT NULL.** An idea without a stop cannot be scored
+  or auto-closed, so the schema refuses to store one. `briefService` drops ideas
+  whose invalidation is on the wrong side of the entry zone rather than
+  persisting an unfalsifiable call.
+- **`positions.broker` + `source`.** `broker` makes a second brokerage a new sync
+  adapter rather than a schema change. `source` separates synced rows (safe to
+  replace wholesale on each sync) from hand-entered rows (never touched).
+- **Enums over CHECK constraints** for the status/direction/type columns, matching
+  the 1.0 `sentiment_enum` convention.
+
+**Manual step required by the owner:**
+Run `supabase/migrations/0004_stein2_schema.sql` in the Supabase SQL editor
+(the established convention — there is no Supabase CLI link for this project).
+
+**Acceptance:** after applying the migration, `select * from positions;`,
+`select * from briefs;`, `select * from recommendations;`, and
+`select * from settings;` all return empty sets, and the 1.0 pipeline is
+unaffected (`/api/health` unchanged).
+
+---
+
+## Phase 16 — flexService: IBKR positions sync ✅
+
+**Goal:** `positions` mirrors the real IBKR account, refreshed before each brief.
+
+**What was built:**
+
+- `src/lib/repositories/positionRepo.ts` — `Position`/`NewPosition` types,
+  `getPositions`, `getPositionTickers`, `countBySource`, `upsertPositions`
+  (upsert on `(broker, ticker_symbol)`), `deleteMissingSyncedPositions`,
+  `upsertManualPosition`, `deletePosition`, `getLatestSyncedAt` (for Phase 24 ops).
+- `src/lib/services/flexService.ts` — the Flex Web Service client:
+  - `sendRequest()` → `SendRequest?t=&q=&v=3` returns a `ReferenceCode` + the
+    GetStatement base URL.
+  - `getStatement()` → polls with backoff. Error **1019** ("generation in
+    progress") retries on a `[3s, 5s, 5s, 10s, 10s, 10s]` schedule (~43s total,
+    inside the route's 60s `maxDuration`). Error **1018** (throttled) gets one
+    30s back-off. Any other `ErrorCode` throws a typed `FlexError`.
+  - `parseOpenPositions()` — regex over `<OpenPosition …/>` elements plus an
+    attribute splitter. Aggregates multiple lots of the same symbol (quantity
+    summed, cost basis weighted by quantity), preserves negative quantities for
+    shorts, drops closed lots (`position="0"`), and skips non-`STK` asset
+    categories with a count.
+  - `syncPositions()` — upsert everything parsed, then delete `source='flex'`
+    rows whose ticker is absent from the statement.
+- `src/app/api/cron/sync-positions/route.ts` — `maxDuration = 60`, standard
+  `CRON_SECRET` bearer check.
+- `.github/workflows/cron.yml` — two new schedules, `30 10 * * 1-5` and
+  `0 21 * * 1-5` (each ~30 min before a brief), routed to a `sync-positions` job.
+
+**Key decisions:**
+
+- **No XML parser dependency.** Flex position XML is flat and attribute-only, so
+  a regex over `<OpenPosition …/>` plus an attribute splitter covers it. Adding
+  a parser package would be a dependency with nothing to do.
+- **Empty-statement guard.** If the statement parses to zero positions while
+  synced rows already exist, the sync aborts with
+  `{ ok: false, reason: 'empty_statement_guard' }` instead of deleting. A
+  truncated or failed statement would otherwise wipe the portfolio the brief
+  model reasons over — one stale sync is far cheaper than a brief that thinks
+  the account is empty.
+- **`source` separates synced from manual rows.** Sync replaces `flex` rows
+  wholesale but never touches `manual` ones, so hand-entered holdings (assets
+  IBKR does not report, or a second broker before its adapter exists) survive.
+- **Only `STK` is synced.** Options and futures need different context
+  (greeks, expiry, margin) than the brief prompt is built for; syncing them
+  would put rows in front of the model it cannot reason about properly. They
+  are counted and logged, not silently dropped.
+- **Unknown tickers are kept, not filtered.** A holding absent from
+  `tickers_master` (foreign listing, recent IPO) is still a real position; the
+  model should see it. Validation against `tickers_master` belongs on *model
+  output*, not on the owner's actual account.
+
+**Manual steps required by the owner (~10 min, one time):**
+1. IBKR Client Portal → Performance & Reports → Flex Queries → new **Activity
+   Flex Query** with the *Open Positions* section, format **XML**, period
+   **Last Business Day**. Note the query ID.
+2. Settings → Account Settings → Flex Web Service → **generate token**.
+3. Add `IBKR_FLEX_TOKEN` and `IBKR_FLEX_QUERY_ID` to Vercel env.
+
+**Acceptance verified:**
+- `npm run build` clean; `/api/cron/sync-positions` in the route table.
+- `parseOpenPositions` exercised against a realistic multi-lot statement:
+  two AAPL lots aggregate to 150 shares with a quantity-weighted cost basis of
+  186.83 (from 100 @ 180.25 and 50 @ 200.00), a short NVDA keeps `-40`, an `OPT`
+  row is skipped (`skipped: 1`), a `position="0"` lot is dropped, and
+  `reportDate="20260814"` converts to `2026-08-14T00:00:00Z`. An empty
+  statement parses to `[]` rather than throwing.
+
+**Not verified live:** the round trip against IBKR needs the owner's token and
+query ID (manual steps above).
+
+---
+
+## Phase 17 — marketDataService + contextPackService + dry-run preview ✅
+
+**Goal:** Assemble, in code, everything the brief model is allowed to reason
+from — and make it inspectable before a single LLM call is spent.
+
+**What was built:**
+
+- `src/lib/marketCalendar.ts` — framework-free NYSE calendar. `isTradingDay`,
+  `addTradingDays`, `previousTradingDay`, `toDateKey`, plus
+  `assertCalendarCoverage()` which warns when the hardcoded holiday list nears
+  its end (currently through 2028). **Fixes the 1.0 defect** where
+  `addTradingDays` counted any Mon–Fri, drifting every time a horizon spanned a
+  holiday. `priceService` now imports from here instead of its own local copy.
+- `src/lib/services/marketDataService.ts` — all numbers computed in code:
+  - `rsi(closes, 14)` — Wilder smoothing, and `sma(values, period)`. Both pure
+    and exported so they can be checked against a reference series.
+  - `computeTechnicals()` — last close, 1d/5d/1mo change, RSI(14), SMA 20/50/200
+    and % distance from each, 52-week high/low and proximity, last volume vs
+    30-day average. Split from the fetch so it is testable without network.
+  - `getTechnicalsBatch()`, `getMacroSnapshot()` (SPY, QQQ, ^VIX, ^TNX),
+    `getEarningsDates()`, `getLastClose()`. Sequential with a 300 ms gap —
+    Yahoo is unauthenticated and rate-sensitive.
+- `src/lib/repositories/briefRepo.ts` — `Brief`/`BriefContent` types, `getBrief`
+  (by date+type), `getBriefById`, `getLatestGeneratedBrief`, `listBriefs`,
+  `createBrief`, `updateBrief`, `getStalePendingBriefs`,
+  `purgeContextPacksOlderThan`.
+- `src/lib/repositories/recommendationRepo.ts` — ledger types and
+  `createRecommendations`, `getOpenRecommendations` (status-indexed),
+  `applyPricing`, `closeRecommendation`, `updateInvalidation`,
+  `getRecommendationHistory`, `getRecommendationsSince`, `getStalestOpenPricedAt`.
+- `src/lib/repositories/articleRepo.ts` — added `getFilteredArticlesSince()`
+  (passed-filter articles in the last N hours, joined to source name).
+- `src/lib/services/contextPackService.ts` — `buildContextPack(briefType)` and
+  `toCompactPack()`; `approxTokens()` for the size budget.
+- `src/app/api/cron/brief/route.ts` — `maxDuration = 300`, `CRON_SECRET`
+  protected, infers `PREMARKET`/`EVENING` from UTC hour. In Phase 17 every call
+  is a dry run returning the pack; `?compact=1` returns the compact variant.
+
+**Key decisions:**
+
+- **The model does synthesis; the code does arithmetic.** An LLM cannot reliably
+  compute an RSI from a list of closes, but it reasons well about "RSI 28, 12%
+  below the 50-day, earnings in 3 days". Every number in the pack is
+  deterministic, so the brief cannot invent a technical level.
+- **Wilder's RSI specifically**, not a simple-average variant. A different
+  smoothing yields visibly different numbers, and the brief would then disagree
+  with whatever chart the owner is looking at.
+- **Open recommendations are part of the pack**, with live P&L, distance to
+  invalidation, and trading days left. The model must confront its own past
+  calls before proposing new ones — this is what makes the ledger
+  self-correcting rather than an ever-growing pile of forgotten ideas.
+- **The 1.0 regex filter survives as the news *selector*.** It still decides
+  which articles are material; what it no longer does is trigger an LLM call per
+  article. News is then ranked — touches a holding (3) > touches a watchlist or
+  open-rec name (2) > general market (1), newest first within a tier — and
+  capped at 60 items with 240-char snippets.
+- **Watchlist entries already held are dropped from the watchlist section**, since
+  the positions section covers them with more detail. Avoids paying tokens twice
+  for the same ticker.
+- **Market-data failures degrade, never throw.** A ticker whose fetch fails gets
+  `technicals: null` and the brief still generates. One dead symbol must not
+  cost the owner a whole brief.
+- **The compact pack exists for Groq only.** Its free-tier tokens-per-minute
+  ceiling cannot fit the full pack, so the last-resort fallback trims news to 15
+  items, shortens theses, and keeps only the three technicals fields that
+  actually drive a decision.
+
+**Acceptance verified:**
+- `npm run build` clean; `/api/cron/brief` in the route table. `tsc --noEmit` clean.
+- `rsi()` checked against Wilder's reference series: returns **70.46**, which
+  matches hand-computation on that data (gains 3.34/14, losses 1.40/14 → RS
+  2.3857 → 70.46). Continuing the series one bar gives 66.25, confirming the
+  smoothing recurrence. Edge cases: all-gains → 100, flat → 50, too-short → null.
+- `computeTechnicals` over a 260-bar synthetic ramp returns coherent values
+  (SMA20 224.75, SMA200 179.75, +27.68% vs SMA200, at 52-week high, volume ratio
+  1.01); empty input → `null`.
+- `marketCalendar`: Wed 2026-11-25 + 1 trading day → **2026-11-27** (skips
+  Thanksgiving), Thu 2026-12-24 + 1 → **2026-12-28** (skips Christmas and the
+  weekend), `isTradingDay('2026-12-25')` → false, previous trading day from
+  Sunday 2026-08-16 → 2026-08-14.
+
+**Not verified live:** `query2.finance.yahoo.com` is not in this sandbox's
+network egress allowlist, so live technicals could not be fetched here. The
+attempt did confirm the degradation path — each failure logged a warning and
+returned `null`/`[]` rather than throwing. Run the dry-run curl after deploy to
+confirm real data:
+`curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/brief?dry_run=1" | jq '.pack.approx_tokens, .pack.counts'`
+
+---
+
+## Phase 18 — briefService: generation, structured output, self-healing ✅
+
+**Goal:** Turn the context pack into a validated, persisted brief with a
+recommendation ledger — and make a failed brief heal itself.
+
+**What was built:**
+
+- `src/lib/services/modelRegistry.ts` — every model that can write a brief, with
+  its `runner`. Two runners exist because the owner's frontier-model access comes
+  from subscriptions, not API keys:
+  - `vercel` — called directly over REST (Gemini 2.5 Pro / Flash, Groq Llama).
+  - `actions` — Claude Opus 5 / Sonnet 5, run headlessly on the owner's Claude
+    subscription inside GitHub Actions (built in Phase 22).
+  Also `DEFAULT_MODEL_ID` and `VERCEL_FALLBACK_CHAIN`.
+- `src/lib/prompts/briefPrompt.ts` — `SYSTEM_PROMPT`, `RESPONSE_SCHEMA`
+  (provider-neutral JSON Schema), `buildBriefPrompt(pack)`, `REPAIR_PROMPT`. The
+  prompt is per-slot: pre-market frames actions "at the open", the evening wrap
+  frames them "at tomorrow's open".
+- `src/lib/services/llmClient.ts` — `callModel`, `callModelForJson`, `stripFences`,
+  `parseJson`. Gemini gets `responseSchema` for enforced structured output; Groq
+  gets `response_format: json_object`.
+- `src/lib/repositories/settingsRepo.ts` — `getSetting`/`setSetting`.
+- `src/lib/services/briefService.ts` — `validateBrief`, `applyBriefToLedger`,
+  `generateBrief`, `completeBriefFromRawOutput` (the entry point the Phase 22
+  Claude worker posts back to).
+- `src/app/api/cron/brief/route.ts` — real generation, with `?dry_run=1` kept.
+  Accepts `?type=`, `?model=`, `?force=1`.
+
+**Key decisions:**
+
+- **Validation is deliberately unforgiving.** A brief is only worth something if
+  its recommendations can be scored later, so anything unscoreable is dropped
+  rather than stored:
+  - An idea whose ticker isn't held and isn't in `tickers_master` — dropped.
+  - **An invalidation on the wrong side of the entry** (a LONG stop *above* the
+    entry zone) — dropped. Such a stop can never trigger, so the position would
+    quietly ride to its horizon no matter how wrong the thesis got. This is the
+    single most important gate in the system.
+  - A holding review for a ticker not actually held, or a `rec_update` naming a
+    recommendation that isn't open — dropped.
+  - `horizon_trading_days` clamped to 1–20, `conviction` to 1–5.
+  Every drop is logged with its reason, so a model that starts drifting is
+  visible rather than silently degrading.
+- **Idempotent, self-healing route.** An existing `GENERATED` brief for a
+  scheduled slot returns `already: true` and does nothing. A missing or `FAILED`
+  brief regenerates and bumps `attempt_count`. That is what lets the cron fire
+  twice per slot — once on time, once as a retry — so a transient provider
+  failure heals with no extra machinery, and a manual retry is one curl.
+- **Provider failure falls through instead of throwing.** `callModel` returns
+  `null` on any failure and the chain tries the next model. In 1.0 a single
+  non-429 error threw and aborted the whole batch.
+- **The Gemini API key moved from the URL to the `x-goog-api-key` header**, so it
+  cannot leak into request logs or error strings (1.0 put it in the query string).
+- **Repair retries send the full prompt.** 1.0's repair path sent only the first
+  500 characters of the original prompt, so a repair silently re-analyzed a
+  truncated input.
+- **Entry basis is snapshotted at creation** (`entry_price` from the pack's last
+  close, `benchmark_entry_price` from SPY), so returns are always measured from a
+  fixed point regardless of when the scoring job first sees the row.
+- **ON_DEMAND briefs bypass the idempotency check**, so the Run Now button can be
+  pressed repeatedly.
+
+**Acceptance verified:**
+- `npm run build` + `tsc --noEmit` clean; `/api/cron/brief` in the route table.
+- `validateBrief` exercised against a crafted model response containing five
+  deliberate defects. Results: hallucinated ticker `ZZZZ` dropped; a LONG idea
+  with invalidation 240 above its 228 entry dropped; a holding review for an
+  unheld `GOOG` dropped; an unknown action `YOLO` dropped; a `rec_update` naming
+  a nonexistent recommendation dropped. Clamping confirmed (horizon 99 → 20,
+  conviction 9 → 5), an empty macro bullet stripped, and the valid SHORT idea
+  (invalidation *above* entry) correctly kept.
+
+**Not verified live:** an end-to-end generation needs `GEMINI_API_KEY` and
+network egress to the provider, neither of which this sandbox has. After deploy:
+`curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/brief?type=premarket"`
+
+---
+
+## Phase 19 — Email + push delivery ✅
+
+**Goal:** The brief comes to the owner. The website becomes the archive, not the
+thing he has to remember to open.
+
+**What was built:**
+
+- `src/lib/services/emailService.ts` — `sendEmail()` posting to
+  `api.resend.com/emails` over plain `fetch`, plus `getRecipient()` and a typed
+  `EmailNotConfiguredError` so a missing key is distinguishable from a send failure.
+- `src/lib/briefHtml.ts` — `renderBriefHtml()` and `briefSubject()`. Table
+  layout, inline CSS, dark palette. Sections: macro strip (SPY/QQQ/VIX/10Y with
+  moves), market bullets, positions with action badges and live P&L, open-idea
+  updates with return and decision, new ideas with entry zone / invalidation /
+  horizon, and the two-week calendar. Everything is escaped via `esc()`.
+- `src/lib/repositories/pushRepo.ts` — added `getAllSubscriptions()`.
+- `src/lib/services/pushService.ts` — extracted the send-and-purge loop into
+  `deliver()`, added `sendPushToAllSubscriptions(payload)`. `notifyForSignal`
+  now rides on the same helper (it is deleted in Phase 23).
+- `src/lib/services/briefService.ts` — `deliverBrief(briefId)`, called from both
+  generation paths and from the already-generated branch.
+
+**Key decisions:**
+
+- **Delivery never fails a brief.** Email and push are each wrapped in their own
+  try/catch. A brief that generated correctly but could not be emailed is still
+  a good brief — `emailed_at` simply stays null.
+- **The retry firing doubles as an email retry.** When the second cron firing
+  finds an already-`GENERATED` brief, it still calls `deliverBrief()`, which
+  re-attempts only the parts that have not succeeded. A transient Resend outage
+  costs a delay, not the email.
+- **The subject line carries the decision.** `Stein Pre-market · 2026-08-17 · 1
+  new idea, 2 position actions` — or `· no action` on a quiet day. The owner can
+  triage from the notification without opening anything.
+- **Push tap URL is `/`.** 1.0 sent `/?highlight=<signal_id>`, which no page ever
+  read, so every notification tap landed on an unchanged feed.
+- **`onboarding@resend.dev` is the default sender.** Resend allows it to reach
+  the account owner's own inbox with no domain verification, so setup is one API
+  key. `BRIEF_FROM_EMAIL` overrides it once a domain is verified.
+- **The disclaimer points at the scoreboard** rather than being generic legal
+  boilerplate — the useful version of "not financial advice" here is "check
+  whether these calls have actually worked".
+
+**Manual steps required by the owner:**
+1. Create a free Resend account, generate an API key.
+2. Add `RESEND_API_KEY` and `BRIEF_RECIPIENT_EMAIL` to Vercel env.
+
+**Acceptance verified:**
+- `npm run build` + `tsc --noEmit` clean.
+- `renderBriefHtml` rendered against a realistic brief (4 macro bullets, 3
+  holdings with P&L, 2 open-idea updates, 1 new idea, 2 calendar items) →
+  13.3 KB of valid HTML, well under any clipping threshold.
+- **Escaping verified:** a macro bullet containing `<script>alert(1)</script> &
+  "quotes"` renders as `&lt;script&gt;…` with no executable tag in the output.
+- **Empty-state verified:** a brief with no ideas and no reviews renders the
+  "No new trade ideas today." line and produces the subject
+  `Stein Pre-market · 2026-08-17 · no action`.
+
+**Not verified live:** actual delivery needs `RESEND_API_KEY` and a registered
+push subscription. After deploy, trigger a brief and check the Resend dashboard.
+
+---
+
+## Phase 20 — Recommendation scoring + scoreboard ✅
+
+**Goal:** Every recommendation gets priced, judged, and closed automatically —
+so the owner can answer "does this thing actually work?" with a number.
+
+**What was built:**
+
+- `src/lib/services/scoringService.ts`:
+  - `directionalReturn(entry, current, direction)` — sign-flipped for SHORT.
+  - `isInvalidated(rec, close)` / `isPastHorizon(rec, now)`.
+  - `scoreOpenRecommendations()` — prices every OPEN row against its entry and
+    against SPY, auto-closes on invalidation or horizon.
+  - `computeScoreboard(sinceDays)` — overall, by direction, by conviction, plus
+    the recent history rows.
+- `src/app/api/cron/score/route.ts` — `maxDuration = 60`, CRON_SECRET.
+- `.github/workflows/cron.yml` — `0 2 * * 2-6` (02:00 UTC Tue–Sat, i.e. after
+  each weekday US close) routed to a `score` job.
+
+**Key decisions:**
+
+- **Alpha vs SPY is the headline metric, not hit rate.** A hit rate alone is
+  flattering and nearly meaningless in a rising market — a system can be right
+  two times out of three and still leave the owner worse off than buying the
+  index. Every closed recommendation stores the benchmark's return over the same
+  holding period, and the scoreboard reports the difference.
+- **Open recommendations never count toward hit rate.** Only rows with a
+  terminal status are scored. Otherwise an unrealized winner would inflate the
+  record indefinitely while losers quietly closed — the classic way a track
+  record lies.
+- **Close-based invalidation, not intraday.** Free EOD data has no reliable
+  intraday series, and closing a trade on a wick that fully recovered would
+  record exits the owner would never have taken. The tradeoff is documented: a
+  spike straight through the stop and back is not counted as a stop-out.
+- **A missing price skips the row rather than closing it.** If Yahoo returns
+  nothing for a ticker, the recommendation is left untouched — a data outage
+  must never auto-close a trade or freeze a stale return as its final result.
+- **One fetch per distinct ticker**, not per recommendation, and
+  `getOpenRecommendations()` is status-indexed. 1.0's validate job re-walked
+  every signal in a 30-day window every night.
+
+**Acceptance verified (unit-level, no network needed):**
+- Directional returns: LONG 100→110 = +10, LONG 100→90 = −10, **SHORT 100→90 =
+  +10** (profits on a fall), SHORT 100→110 = −10, null entry → null.
+- Invalidation: LONG stop 90 → false at 95, **true at exactly 90**, true at 85;
+  SHORT stop 110 → false at 105, true at 115.
+- Horizon: false the day before, true on the horizon date and after.
+- Scoreboard over 4 recommendations (3 closed, 1 open): hit rate **66.7%**
+  (the open +20% correctly excluded), avg return **+1.0%**, avg alpha
+  **−1.67%**. That divergence is the point — the system won two of three and
+  still trailed SPY, which is exactly what the scoreboard exists to surface.
+
+**Not verified live:** needs real open recommendations and Yahoo access. After
+deploy, insert a synthetic OPEN row with a tight invalidation, run
+`curl -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/score"`,
+confirm it transitions to `CLOSED_INVALIDATED`, then delete the row.
+
+---
+
+## Phase 21 — UI rebuild ✅
+
+**Goal:** The site becomes the brief, its archive, and the scoreboard. The
+signal feed is gone.
+
+**What was built:**
+
+- `src/components/Nav.tsx` — Brief | Archive | Scoreboard | Portfolio | Sign out.
+  Replaces the nav that was copy-pasted into three pages.
+- `src/app/actions.ts` — app-level server actions: `signOutAction` (moved out of
+  the watchlist), `runBriefNowAction`, `setDefaultModelAction`.
+- `src/components/BriefView.tsx` — server component rendering a stored brief:
+  macro strip, market bullets, positions with action badges and live P&L,
+  open-idea updates, new ideas with entry/invalidation/horizon, calendar.
+- `src/components/RunNowPanel.tsx` — **the one client component.** Model picker
+  plus Run button. A `vercel` model generates inline; an `actions` model returns
+  `pending` and the panel polls `/api/briefs/[id]/status` until it flips.
+- `src/app/api/briefs/[id]/status/route.ts` — session-authenticated status poll.
+- `src/app/page.tsx` — today's brief, falling back to the most recent with an
+  amber "not today's" notice.
+- `src/app/briefs/page.tsx` + `src/app/briefs/[id]/page.tsx` — archive and detail.
+- `src/app/scoreboard/page.tsx` — four stat tiles (**alpha vs SPY first**),
+  breakdown by direction and conviction, and the full recommendation history.
+- `src/app/portfolio/page.tsx` — positions with totals and sync age, manual
+  entry (`ManualPositionForm.tsx`), watchlist, and push toggle in one place.
+- `src/lib/services/dispatchService.ts` — builds the pack, parks a PENDING brief,
+  fires the GitHub Actions workflow. (Its worker lands in Phase 22.)
+
+**Deleted:** `src/app/stats/page.tsx`, `src/app/watchlist/page.tsx`,
+`src/components/SignalCard.tsx`, `src/components/FeedToggle.tsx`.
+`WatchlistManager` moved under `/portfolio` and **lost its unused `userEmail`
+prop**, dead since Phase 10.
+
+**Key decisions:**
+
+- **Alpha vs SPY is the first tile on the scoreboard**, ahead of hit rate. The
+  page also explains in plain language why: a good hit rate with negative alpha
+  means the ideas made money but the index would have made more.
+- **`/watchlist` → `/portfolio` and `/stats` → `/scoreboard` redirect in the
+  proxy.** Bookmarks and any 1.0 push notification still resolve. The auth check
+  runs first, so an unauthenticated hit on a legacy path lands on `/login`.
+- **One client component only.** Everything else stays a server component with
+  URL state (the Phase 10/12 philosophy). `RunNowPanel` has to be a client
+  component because subscription-backed models finish asynchronously.
+- **The brief page links to the scoreboard** with "Has any of this worked?" —
+  the accountability loop should be one click from the recommendations.
+- **globals.css Geist fix.** The scaffold hardcoded `font-family: Arial` on
+  `body`, silently overriding the Geist fonts `layout.tsx` has loaded since
+  Phase 0. Now uses `var(--font-geist-sans)`; light-mode variables dropped since
+  the app is deliberately dark-only.
+
+**Acceptance verified:**
+- `npm run build` + `tsc --noEmit` clean. Route table: `/`, `/briefs`,
+  `/briefs/[id]`, `/scoreboard`, `/portfolio`, `/login`,
+  `/api/briefs/[id]/status` — no `/stats` or `/watchlist` pages.
+- **Ran the dev server and probed it live:** `/login` returns 200 and renders the
+  email+password form (no magic-link copy); `/` unauthenticated returns 307 to
+  `/login`; `/watchlist` and `/stats` return 307 rather than 404.
+- Screenshotted `/login` — renders correctly in Geist, confirming the font fix.
+
+---
+
+## Phase 22 — Claude-on-subscription brief worker ✅
+
+**Goal:** Write briefs with a frontier model at no marginal cost, using the
+owner's existing Claude Pro/Max subscription.
+
+**The problem this solves:** a consumer Claude subscription is not an API key, so
+it cannot be called from a Vercel function. But `claude setup-token` is the
+supported way to run Claude Code headlessly in CI, and Stein's cron already lives
+in GitHub Actions — so the subscription is reachable from there.
+
+**What was built:**
+
+- `.github/workflows/brief-worker.yml` — `workflow_dispatch` taking
+  `{brief_id, model}`. Installs Claude Code, fetches the finished prompt from the
+  app, runs `claude -p --model <id> --output-format text`, POSTs the output back.
+  `if: always()` on the final step so a Claude failure still reports rather than
+  leaving the brief PENDING.
+- `src/app/api/cron/brief-pack/route.ts` — hands the worker the prompt built from
+  the brief's stored context pack. The worker never touches the database.
+- `src/app/api/cron/brief-result/route.ts` — feeds the worker's raw output into
+  `completeBriefFromRawOutput`, i.e. **exactly the same validation, ledger, and
+  delivery path as an in-app generation**. The worker is a transport, not a
+  second implementation.
+- `src/lib/services/briefService.ts` — `generateBrief` now dispatches when the
+  chosen model is an `actions` runner; added `healStalePendingBriefs()`.
+- `.github/workflows/cron.yml` — brief schedules `0 11` / `45 11` and
+  `30 21` / `15 22` (weekdays), routed by a `case` on the schedule string.
+
+**Key decisions:**
+
+- **The pack is built in the app, not the worker.** The worker has no Supabase
+  credentials, and storing the pack before dispatch means the result route can
+  validate the model's output against exactly the input it was given.
+- **Three layers of fallback, so a brief always exists:**
+  1. Dispatch fails outright → fall through to the inline Gemini chain immediately.
+  2. The worker runs but Claude fails → it POSTs `{error}` and the brief is
+     marked FAILED rather than hanging.
+  3. The worker never reports at all → `healStalePendingBriefs()` finds anything
+     PENDING for more than 30 minutes on the retry firing and regenerates it inline.
+- **The prompt goes to a file, not an argv string or env var.** It embeds the
+  whole context pack and would blow past shell argument limits.
+- **Each brief slot fires twice** (`0 11` + `45 11`). The second pass carries
+  `heal=1`, so one schedule entry covers retry *and* rescue.
+- **Honest limits, recorded:** subscription usage is shared with the owner's own
+  Claude usage — 2–4 briefs/day is negligible, but it is not free capacity. If the
+  token is ever revoked, the registry simply loses its `actions` entries and the
+  Gemini path is unaffected. An `ANTHROPIC_API_KEY` would make Claude instant on
+  Vercel for cents per brief; deliberately not enabled, to honor the $0 constraint.
+
+**Manual steps required by the owner:**
+1. Run `claude setup-token` locally → add the value as the `CLAUDE_CODE_OAUTH_TOKEN`
+   GitHub Actions secret.
+2. Create a fine-grained GitHub PAT scoped to this repo with **Actions: write** →
+   add as `GITHUB_DISPATCH_TOKEN` in Vercel, along with `GITHUB_REPO=owner/repo`.
+
+**Acceptance verified:**
+- `npm run build` + `tsc --noEmit` clean; both new routes in the table.
+- Both workflow files parse as valid YAML.
+- **Schedule routing checked exhaustively:** a script parsed `cron.yml` and
+  matched all **13** schedules against every job's `if:` condition — each routes
+  to **exactly one** job, with zero orphaned and zero double-routed entries. This
+  is the class of bug that left 1.0 with an 8-hour weekend gap.
+
+**Not verified live:** needs the owner's `CLAUDE_CODE_OAUTH_TOKEN` and
+`GITHUB_DISPATCH_TOKEN`. After setup: press Run now with a Claude model, watch
+the run appear in the Actions tab, and confirm the brief flips to GENERATED.
+
+---
+
+## Phase 23 — Cutover: cron rework, keepalive, retire per-article LLM ✅
+
+**Goal:** Stop making 800 tiny LLM calls a day, and make the cron impossible to
+silently break — the two failures that between them killed Stein 1.0.
+
+**What was built:**
+
+- `.github/workflows/cron.yml` — **rewritten as one job with one routing table.**
+  A `case` on the schedule string maps each entry to a space-separated endpoint
+  list; an unmapped schedule prints a GitHub error annotation and **fails the
+  run**. 1.0 spread routing across per-job `if:` expressions, so adding a
+  schedule without editing every job's condition silently orphaned it — which is
+  precisely how weekends ended up with an 8-hour ingest gap.
+- **Keepalive job** (`0 5 1 * *`, monthly): `gh api -X PUT
+  repos/.../actions/workflows/cron.yml/enable` with `permissions: actions:
+  write`. GitHub disables scheduled workflows after 60 days of repository
+  inactivity — that is what stopped 1.0 dead. Re-enabling resets the clock
+  whether or not anyone has committed.
+- `src/app/api/cron/select/route.ts` — replaces `analyze`. Runs the same filter
+  pipeline to mark `passed_filter`, makes **zero LLM calls**, and catches
+  per-article errors so one bad row cannot abort the batch.
+- `src/app/api/cron/cleanup/route.ts` — replaces `dedup-cleanup`. Purges dedup
+  hashes (48h), nulls stored context packs older than 30 days, and deletes
+  rejected articles older than 90 days.
+- `src/lib/repositories/articleRepo.ts` — added `purgeRejectedOlderThan(days)`.
+- `src/lib/services/filterService.ts` — removed the LLM budget stage and the
+  watchlist-priority bypass, and with them the `analysisRepo`/`watchlistRepo`
+  imports.
+- `src/lib/services/pushService.ts` — dropped `notifyForSignal` and its
+  per-ticker cap/dedup logic; only the generic brief sender remains.
+
+**Deleted:** `api/cron/analyze`, `api/cron/validate`, `api/cron/dedup-cleanup`,
+`api/stats`, `llmService.ts`, `validationService.ts`, `sentimentPrompt.ts`.
+
+**Final schedule (all UTC):**
+
+| Cron | Endpoints |
+|---|---|
+| `*/30 11-22 * * 1-5` | ingest, select |
+| `0 0-10,23 * * *` / `0 * * * 0,6` | ingest, select (off-hours, weekends) |
+| `30 10 * * 1-5` / `0 21 * * 1-5` | sync-positions |
+| `0 11` / `45 11` `* * 1-5` | brief (pre-market, then retry+heal) |
+| `30 21` / `15 22` `* * 1-5` | brief (evening, then retry+heal) |
+| `0 2 * * 2-6` | score |
+| `0 3 * * *` | cleanup |
+| `0 4 * * 0` | refresh-tickers |
+| `0 5 1 * *` | keepalive |
+
+**Key decisions:**
+
+- **The dedup-hash ordering is preserved deliberately.** 1.0 saved the hash
+  before the budget check, so a budget-dropped article left its hash behind and
+  that story could never be seen again — the news was lost, not deferred. There
+  is no budget stage now, but the invariant is documented in the code: a hash
+  must only ever record something that actually passed.
+- **Ingest drops from every 10 minutes to every 30.** Two briefs a day do not
+  need 10-minute news granularity, and it roughly thirds the Actions minutes.
+- **`workflow_dispatch` takes an `endpoints` input**, so any endpoint can be run
+  by hand from the Actions tab without editing the file.
+
+**Acceptance verified:**
+- Clean rebuild (`rm -rf .next && npm run build`) + `tsc --noEmit` clean.
+- Route table confirms `analyze`, `validate`, `dedup-cleanup`, and `stats` are
+  gone and `select` + `cleanup` are present.
+- Parsed the workflow and checked all **13** schedules against the `case` block:
+  every one is mapped, and the keepalive job is present.
+
+**Not verified live:** the first re-enable after months of inactivity is manual
+(Actions tab → workflow → Enable). Pushing this commit also resets the clock.
+
+---
+
+## Phase 24 — Ops v2, dead-code cleanup, docs rewrite ✅
+
+**Goal:** Health checks that describe the pipeline that actually exists, a
+codebase with no 1.0 remnants, and docs that can be trusted as the project's
+operating system.
+
+**What was built:**
+
+- `src/lib/services/opsService.ts` — rewritten. New checks:
+  - Last source poll > 90 min → the cron may be disabled.
+  - **Expected-brief check** — on a trading day past the slot's grace hour
+    (12:00 UTC pre-market, 23:00 UTC evening), a brief that is missing, `FAILED`,
+    still `PENDING`, or generated-but-not-emailed is an issue.
+  - Positions synced > 30h ago → the brief may be reasoning over stale holdings.
+  - Open recommendations unpriced > 48h → scoring may not be running.
+  - LLM-budget metrics removed; there is no per-article budget any more.
+- `src/app/api/health/route.ts` and `src/components/OpsBanner.tsx` needed **no
+  changes** — both consume only `status` and `issues`, so the rewrite passed
+  straight through. That is the abstraction working.
+
+**Dead code deleted** (each verified to have zero callers before removal):
+
+| Removed | Why |
+|---|---|
+| `signalRepo.ts`, `analysisRepo.ts`, `outcomeRepo.ts`, `pushHistoryRepo.ts` | their tables are frozen 1.0 history |
+| `priceService.ts` | scoring uses `marketDataService.getLastClose`; the only remaining reference to `getClosingPriceAt` was internal |
+| `articleRepo.getArticleByUrl` | never called |
+| `pushRepo.getSubscriptionsForUser` / `getSubscriptionsForUsers` | single-user app; briefs push to every device |
+| `watchlistRepo.getUsersWatchingTicker` | only existed for per-signal push |
+
+**Docs rewritten:**
+
+- `docs/overview.md` — brief-centric, with an explicit "why 2.0 exists" section
+  listing the five structural reasons 1.0 failed.
+- `docs/pipeline.md` — the inversion (many small calls → two large ones), the
+  context pack, the validation gate, scoring, delivery, and self-healing.
+- `docs/code-structure.md` — new folder map, the eight hard rules, the full cron
+  table, and the env-var table.
+- `docs/data-model.md` — documented the four frozen tables and stated plainly
+  that they are unreachable from code by design.
+- `README.md` — replaced the untouched `create-next-app` boilerplate with what
+  Stein is, the env-var table, one-time setup, and an **ops runbook** (health,
+  dry-run, force a brief, heal stuck briefs, re-enable the cron, rotate the Flex
+  token, run any endpoint by hand).
+- `CLAUDE.md` — hard rules updated: the 800-calls/day budget rule became
+  "≤2 large brief calls per scheduled day, never reintroduce a per-article
+  call"; added the never-persist-an-unscoreable-recommendation rule and the
+  frozen-tables rule; corrected "9 DB tables" to 14.
+- `docs/phases-log.md` — removed the **2** leftover `_Not yet started._` lines
+  that had been sitting directly under the Phase 11 and 12 ✅ headers since 1.0,
+  contradicting their own entries.
+
+**Acceptance verified:**
+- Clean `npm run build` and `tsc --noEmit` with the entire 1.0 data layer removed.
+- `grep` confirms no remaining references to the deleted modules.
+
+---
+
+# Stein 2.0 — status
+
+Phases 14–24 complete. The system now: syncs the portfolio, selects news without
+any model call, builds a context pack, generates a brief twice a day (on a
+frontier model via subscription, with a free-tier fallback chain), validates it
+so nothing unscoreable is stored, writes a recommendation ledger, delivers by
+email and push, prices the ledger nightly against SPY, and surfaces all of it on
+a scoreboard.
+
+Phase 25 (intraday alerts for holdings/watchlist) remains optional and is not
+started — worth revisiting only once the scoreboard shows the twice-daily briefs
+are actually producing alpha.
+
+---
+
+## Phase 25 — Preflight check + setup page ✅
+
+**Goal:** Make credential setup self-verifying. Without this, a wrong key
+surfaces as a 500 from a cron endpoint hours later.
+
+**What was built:**
+
+- `src/lib/services/preflightService.ts` — checks each integration and reports
+  one of `ok` / `missing` / `error` / `skipped`, each with a **fix hint**:
+  Supabase (queries `briefs`, so it also proves migration 0004 ran), CRON_SECRET,
+  Gemini (lists models — validates the key without spending generation budget),
+  IBKR Flex, Resend (`/domains` — a free authenticated read; sends nothing),
+  Yahoo, GitHub dispatch (also reports if the worker workflow is disabled), VAPID.
+- `src/app/api/preflight/route.ts` — authenticated by **session OR CRON_SECRET**,
+  so it works from a terminal before the Supabase user exists.
+- `src/app/setup/page.tsx` — the same checks as a page, split required/optional.
+
+**Key decisions:**
+
+- **Cheap by default.** No LLM generation, no email sent, and the IBKR statement
+  request (~45s) is opt-in via `?deep=1`. Everything else is a sub-second
+  credential validation.
+- **Every failure carries its remedy**, not just its symptom — e.g. a Supabase
+  "relation does not exist" says to run migration 0004, rather than reporting a
+  raw Postgres error.
+- **`skipped` counts as ready.** Credentials being present with only the slow
+  live call deferred should not block the "ready" verdict.
+
+**Verified:** run with no credentials at all — correctly reported 7 missing and
+1 error, each with the right fix line, and `ready: false`.
+
+---
+
+## Phase 26 — Test suite ✅
+
+**Goal:** Convert the ad-hoc verifications from phases 16–20 into committed
+regression protection.
+
+**What was built:** `tests/` with **39 tests** covering the trading calendar,
+RSI/SMA/technicals, Flex statement parsing, the brief validation gates, scoring
+maths, and email rendering. Run with `npm test`.
+
+**Zero new dependencies** — Node's built-in `node:test` over `tsc` output. `tsc`
+does not rewrite path aliases, so the pretest step symlinks
+`.test-build/node_modules/@/lib → .test-build/src/lib`, letting ordinary Node
+resolution handle `@/`. This avoids adding jest, vitest, tsx, or a loader.
+
+**It immediately found a real bug.** A model emitting `[null]` inside a
+structured array — which they occasionally do — made `validateBrief` throw on
+`item.ticker`, failing the entire brief over one malformed entry. Fixed with an
+`asRecord()` guard on all four loops. Also hardened `validateTickerBatch` so a
+ticker-DB outage drops the unverifiable idea instead of throwing.
+
+**Not covered:** anything needing network or database access. Those are verified
+against live services by `/api/preflight` and the README runbook.
+
+---
+
+## Phase 27 — Demo seed ✅
+
+**Goal:** Let the owner judge the UI before any credential exists.
+
+**What was built:** `src/lib/services/demoService.ts`, `POST`/`DELETE
+/api/demo`, and a **Load sample data** control on `/setup`. Seeds one brief,
+three positions, and five recommendations, all tagged and fully removable.
+
+**Key decision — the sample ledger is deliberately mixed:** an open winner, a
+closed winner that beat SPY, **a winner that lagged SPY**, a stopped-out short,
+and one closed early by a later brief. A demo showing only wins would
+misrepresent what the scoreboard is for; this one renders a realistic 60% hit
+rate alongside honest alpha.
+
+**Acceptance:** build + `tsc` clean, all 39 tests pass, new routes present.

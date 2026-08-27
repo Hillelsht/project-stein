@@ -1,16 +1,9 @@
 import webpush from 'web-push'
-import { getSubscriptionsForUsers, deleteSubscription } from '@/lib/repositories/pushRepo'
-import { getUsersWatchingTicker } from '@/lib/repositories/watchlistRepo'
 import {
-  countSentToday,
-  recordPushSent,
-  wasTickerPushedRecently,
-} from '@/lib/repositories/pushHistoryRepo'
-import type { MarketSignal } from '@/lib/repositories/signalRepo'
-
-const SCORE_THRESHOLD = 8
-const DAILY_PUSH_CAP = 10
-const TICKER_DEDUP_MINUTES = 30
+  getAllSubscriptions,
+  deleteSubscription,
+  type PushSubscription,
+} from '@/lib/repositories/pushRepo'
 
 let vapidConfigured = false
 function configureVapid(): boolean {
@@ -29,10 +22,8 @@ function configureVapid(): boolean {
 
 type Payload = { title: string; body: string; url: string; tag?: string }
 
-async function sendToUser(userId: string, payload: Payload, signal: MarketSignal): Promise<void> {
-  const subs = await getSubscriptionsForUsers([userId])
-  if (subs.length === 0) return
-
+/** Sends to a set of subscriptions, purging any the browser reports as dead. */
+async function deliver(subs: PushSubscription[], payload: Payload): Promise<number> {
   const body = JSON.stringify(payload)
   let delivered = 0
 
@@ -57,36 +48,19 @@ async function sendToUser(userId: string, payload: Payload, signal: MarketSignal
     }),
   )
 
-  if (delivered > 0) {
-    await recordPushSent({
-      user_id: userId,
-      ticker_symbol: signal.ticker_symbol,
-      signal_id: signal.id,
-    })
-  }
+  return delivered
 }
 
-export async function notifyForSignal(signal: MarketSignal, summary: string): Promise<void> {
-  if (signal.sentiment_score < SCORE_THRESHOLD) return
-  if (!configureVapid()) return
-
-  const watchers = await getUsersWatchingTicker(signal.ticker_symbol)
-  if (watchers.length === 0) return
-
-  const payload: Payload = {
-    title: `${signal.ticker_symbol} · ${signal.sentiment} · ${signal.sentiment_score}/10`,
-    body: summary.slice(0, 200),
-    url: `/?highlight=${signal.id}`,
-    tag: signal.ticker_symbol,
+/**
+ * Sends one notification to every registered device. Used for brief-ready
+ * alerts, which are not per-ticker and have no watchlist to filter on.
+ */
+export async function sendPushToAllSubscriptions(payload: Payload): Promise<number> {
+  if (!configureVapid()) return 0
+  const subs = await getAllSubscriptions()
+  if (subs.length === 0) {
+    console.log('[push] no subscriptions registered')
+    return 0
   }
-
-  for (const userId of watchers) {
-    if (await wasTickerPushedRecently(userId, signal.ticker_symbol, TICKER_DEDUP_MINUTES)) {
-      continue
-    }
-    if ((await countSentToday(userId)) >= DAILY_PUSH_CAP) {
-      continue
-    }
-    await sendToUser(userId, payload, signal)
-  }
+  return deliver(subs, payload)
 }

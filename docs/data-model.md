@@ -2,9 +2,26 @@
 
 All tables live in the Supabase `public` schema. All use `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` and `created_at TIMESTAMPTZ NOT NULL DEFAULT now()` unless noted.
 
-Migration file: `supabase/migrations/0001_initial_schema.sql`
+Migrations (applied by hand in the Supabase SQL editor):
 
-## Tables
+| File | Contents |
+|---|---|
+| `0001_initial_schema.sql` | The 9 original 1.0 tables |
+| `0002_push_history.sql` | `push_history` |
+| `0003_signal_outcomes_unique_signal_id.sql` | `UNIQUE (signal_id)` bugfix for the validate cron's upsert |
+| `0004_stein2_schema.sql` | Stein 2.0: `positions`, `briefs`, `recommendations`, `settings` |
+
+**14 tables total.** Ten from 1.0, four from 2.0.
+
+Four 1.0 tables are **frozen** as of the Phase 23 cutover: `ai_analyses`,
+`market_signals`, `signal_outcomes`, and `push_history`. Nothing writes to them,
+and their repositories were deleted in Phase 24 — so they are unreachable from
+application code by design. They are kept because the rows are a real record of
+what 1.0 did, and dropping them saves nothing on the free tier. Read them in the
+Supabase SQL editor if you ever want the history; do not add code that depends
+on them.
+
+## Stein 1.0 tables
 
 ### `sources`
 RSS feed sources. Seeded manually; not written to by the frontend.
@@ -129,18 +146,109 @@ Web Push API subscriptions. RLS: users see and write only their own rows.
 | p256dh | text | Web Push key |
 | auth | text | Web Push key |
 
-## Enum
+### `push_history`
+Every push sent. Powers the daily cap and per-ticker dedup. Added in `0002`.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | uuid | PK |
+| user_id | uuid | FK auth.users |
+| ticker_symbol | text | |
+| signal_id | uuid | nullable |
+| sent_at | timestamptz | |
+
+Indexes: `(user_id, sent_at DESC)`, `(user_id, ticker_symbol, sent_at DESC)`.
+
+## Stein 2.0 tables
+
+### `positions`
+The portfolio the briefs reason over. Broker-agnostic: `broker` is a plain text
+discriminator so a second brokerage is a new sync adapter, not a schema change.
+
+| Column | Type | Notes |
+|---|---|---|
+| broker | text | default `'ibkr'` |
+| ticker_symbol | text | UNIQUE together with `broker` |
+| quantity | numeric | |
+| avg_cost, market_value, unrealized_pnl | numeric | from the Flex statement |
+| currency | text | default `'USD'` |
+| asset_class | text | only `STK` is synced today |
+| source | text | `'flex'` (replaced wholesale by each sync) or `'manual'` (never touched by a sync) |
+| as_of | timestamptz | statement date |
+
+### `briefs`
+One row per generated or attempted brief.
+
+| Column | Type | Notes |
+|---|---|---|
+| brief_date | date | |
+| brief_type | brief_type_enum | PREMARKET / EVENING / ON_DEMAND |
+| status | brief_status_enum | PENDING (dispatched to the Actions worker) / GENERATED / FAILED |
+| content | jsonb | the validated structured output |
+| context_pack | jsonb | audit copy of the model's input; nulled after 30 days by the cleanup cron |
+| requested_model, model | text | what was asked for vs. what actually answered |
+| tokens_in, tokens_out | int | |
+| error, attempt_count | text, int | |
+| generated_at, emailed_at, pushed_at | timestamptz | delivery tracking |
+
+Unique index `(brief_date, brief_type) WHERE brief_type IN ('PREMARKET','EVENING')` —
+the idempotency key that lets the brief cron fire twice per slot (once on time,
+once as a retry) without creating a duplicate. `ON_DEMAND` runs are unconstrained.
+
+### `recommendations`
+The accountability ledger — one row per trade idea, carrying its whole
+lifecycle. No per-horizon fan-out (unlike 1.0's `signal_outcomes`): the nightly
+scoring job overwrites `current_*` and stamps `closed_*` exactly once.
+
+| Column | Type | Notes |
+|---|---|---|
+| brief_id | uuid | FK briefs — the brief that proposed it |
+| ticker_symbol | text | validated against `tickers_master` or `positions` before insert |
+| direction | rec_direction_enum | LONG / SHORT |
+| thesis | text | |
+| entry_zone_low / entry_zone_high | numeric | |
+| invalidation_price | numeric | NOT NULL — an idea without a stop is not tracked |
+| horizon_trading_days | int | 1–20 |
+| horizon_date | date | computed via `marketCalendar.addTradingDays` |
+| conviction | int | 1–5 |
+| status | rec_status_enum | indexed; scoring walks only OPEN |
+| entry_price, benchmark_entry_price | numeric | snapshotted at creation (SPY is the benchmark) |
+| current_price, current_return_pct, benchmark_return_pct, last_priced_at | | refreshed nightly while OPEN |
+| closed_at, close_price, closed_by_brief_id, close_note | | frozen once on close |
+
+Per-holding reviews (HOLD/TRIM/ADD/CLOSE/WATCH) are commentary, not tracked
+bets, so they live inside `briefs.content` rather than in this table.
+
+### `settings`
+Tiny key/value store for owner preferences (e.g. `default_brief_model`), so a
+new preference is a row rather than a migration.
+
+| Column | Type | Notes |
+|---|---|---|
+| key | text | PK |
+| value | jsonb | |
+| updated_at | timestamptz | |
+
+## Enums
 
 ```sql
-CREATE TYPE sentiment_enum AS ENUM ('BULLISH', 'BEARISH', 'NEUTRAL');
+CREATE TYPE sentiment_enum    AS ENUM ('BULLISH', 'BEARISH', 'NEUTRAL');   -- 1.0, frozen
+CREATE TYPE brief_type_enum   AS ENUM ('PREMARKET', 'EVENING', 'ON_DEMAND');
+CREATE TYPE brief_status_enum AS ENUM ('PENDING', 'GENERATED', 'FAILED');
+CREATE TYPE rec_direction_enum AS ENUM ('LONG', 'SHORT');
+CREATE TYPE rec_status_enum   AS ENUM (
+  'OPEN', 'CLOSED_TARGET', 'CLOSED_INVALIDATED', 'CLOSED_HORIZON', 'CLOSED_BY_MODEL'
+);
 ```
+
+`CLOSED_TARGET` is reserved — briefs express targets inside the thesis and entry
+zone rather than as a machine-checkable price, so nothing sets it yet.
 
 ## Row Level Security
 
 | Table | Policy |
 |---|---|
-| sources, articles, ai_analyses, market_signals, signal_outcomes, tickers_master, dedup_hashes | SELECT for `authenticated` role; no client writes |
-| watchlist | ALL ops for `authenticated` where `auth.uid() = user_id` |
-| push_subscriptions | ALL ops for `authenticated` where `auth.uid() = user_id` |
+| sources, articles, ai_analyses, market_signals, signal_outcomes, tickers_master, dedup_hashes, positions, briefs, recommendations, settings | SELECT for `authenticated` role; no client writes |
+| watchlist, push_subscriptions, push_history | owner-only (`auth.uid() = user_id`) |
 
 All backend writes go through the `SUPABASE_SERVICE_ROLE_KEY`, which bypasses RLS. Client never holds the service role key.

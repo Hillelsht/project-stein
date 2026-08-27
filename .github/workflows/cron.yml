@@ -1,73 +1,107 @@
 name: Project Stein Cron
 
+# One job, one routing table.
+#
+# Stein 1.0 spread routing across per-job `if:` expressions comparing schedule
+# strings. Adding a schedule without also editing every job's condition silently
+# orphaned it — which is how weekends ended up with an 8-hour ingest gap. Here
+# every schedule maps to an endpoint list in a single `case`, and an unmapped
+# schedule fails the run loudly instead of doing nothing.
+
 on:
   schedule:
-    # Market hours Mon-Fri 14:00-21:59 UTC, every 10 min → ingest + analyze
-    - cron: '*/10 14-21 * * 1-5'
-    # Extended / overnight, top of every hour outside market window → ingest + analyze
-    - cron: '0 0-13,22-23 * * *'
-    # Weekend daytime fill — top of every hour Sat/Sun 14:00-21:00 UTC
-    # (the two schedules above cover Mon-Fri and the off-hour band; without this
-    # rule weekends had a 9-hour ingest gap that triggered false ops alarms.)
-    - cron: '0 14-21 * * 0,6'
-    # Daily price validation at 02:00 UTC (Phase 8 — will 404 until built)
-    - cron: '0 2 * * *'
-    # Dedup hash cleanup at 03:00 UTC
-    - cron: '0 3 * * *'
-    # Weekly ticker master refresh, Sunday 04:00 UTC
-    - cron: '0 4 * * 0'
+    # ── Ingest + select (news for the brief; no LLM calls) ──
+    - cron: '*/30 11-22 * * 1-5'   # market hours, every 30 min
+    - cron: '0 0-10,23 * * *'      # off-hours, hourly
+    - cron: '0 * * * 0,6'          # weekends, hourly
+    # ── Portfolio sync, 30 min before each brief ──
+    - cron: '30 10 * * 1-5'
+    - cron: '0 21 * * 1-5'
+    # ── Briefs (each slot fires twice; the second retries and heals) ──
+    - cron: '0 11 * * 1-5'         # pre-market, 07:00 EDT
+    - cron: '45 11 * * 1-5'
+    - cron: '30 21 * * 1-5'        # evening wrap, 17:30 EDT
+    - cron: '15 22 * * 1-5'
+    # ── Housekeeping ──
+    - cron: '0 2 * * 2-6'          # score recommendations after each close
+    - cron: '0 3 * * *'            # cleanup
+    - cron: '0 4 * * 0'            # refresh ticker master
+    - cron: '0 5 1 * *'            # monthly keepalive (see below)
   workflow_dispatch:
+    inputs:
+      endpoints:
+        description: 'Space-separated endpoints, e.g. "ingest select"'
+        required: false
+        default: 'ingest select'
+        type: string
 
 jobs:
-  ingest-analyze:
-    name: Ingest + Analyze
-    # Runs on all schedules except the three dedicated jobs, and on manual trigger.
-    # Empty schedule string (workflow_dispatch) != any of the excluded strings → runs.
-    if: "github.event.schedule != '0 2 * * *' && github.event.schedule != '0 3 * * *' && github.event.schedule != '0 4 * * 0'"
+  run:
+    name: Run scheduled endpoints
+    # The keepalive is a separate job; everything else routes through here.
+    if: github.event.schedule != '0 5 1 * *'
     runs-on: ubuntu-latest
     steps:
-      - name: Ingest
+      - name: Route schedule to endpoints
+        id: route
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          MANUAL: ${{ inputs.endpoints }}
         run: |
-          curl -fsS \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.APP_URL }}/api/cron/ingest"
+          set -euo pipefail
+          if [ -z "${SCHEDULE:-}" ]; then
+            # Manual dispatch
+            ENDPOINTS="${MANUAL:-ingest select}"
+          else
+            case "$SCHEDULE" in
+              '*/30 11-22 * * 1-5'|'0 0-10,23 * * *'|'0 * * * 0,6')
+                ENDPOINTS='ingest select' ;;
+              '30 10 * * 1-5'|'0 21 * * 1-5')
+                ENDPOINTS='sync-positions' ;;
+              '0 11 * * 1-5')   ENDPOINTS='brief?type=premarket' ;;
+              '45 11 * * 1-5')  ENDPOINTS='brief?type=premarket&heal=1' ;;
+              '30 21 * * 1-5')  ENDPOINTS='brief?type=evening' ;;
+              '15 22 * * 1-5')  ENDPOINTS='brief?type=evening&heal=1' ;;
+              '0 2 * * 2-6')    ENDPOINTS='score' ;;
+              '0 3 * * *')      ENDPOINTS='cleanup' ;;
+              '0 4 * * 0')      ENDPOINTS='refresh-tickers' ;;
+              *)
+                echo "::error::Unmapped schedule '$SCHEDULE' — add it to the case in cron.yml"
+                exit 1 ;;
+            esac
+          fi
+          echo "endpoints=$ENDPOINTS" >> "$GITHUB_OUTPUT"
+          echo "Routing '$SCHEDULE' -> $ENDPOINTS"
 
-      - name: Analyze
+      - name: Call endpoints
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          ENDPOINTS: ${{ steps.route.outputs.endpoints }}
         run: |
-          curl -fsS \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.APP_URL }}/api/cron/analyze"
+          set -euo pipefail
+          for ep in $ENDPOINTS; do
+            echo "→ /api/cron/${ep}"
+            curl -fsS --retry 2 --max-time 300 \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              "${APP_URL}/api/cron/${ep}"
+            echo
+          done
 
-  validate:
-    name: Validate Signals
-    # Phase 8 builds this endpoint; job will fail with 404 until then.
-    if: github.event.schedule == '0 2 * * *'
+  keepalive:
+    name: Keep workflow enabled
+    # GitHub disables scheduled workflows after 60 days without repository
+    # activity. That is exactly what killed Stein 1.0 — the cron silently
+    # stopped and nothing ingested for months. Re-enabling resets the clock.
+    if: github.event.schedule == '0 5 1 * *'
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
-      - name: Validate
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          curl -fsS \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.APP_URL }}/api/cron/validate"
-
-  dedup-cleanup:
-    name: Dedup Hash Cleanup
-    if: github.event.schedule == '0 3 * * *'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Cleanup
-        run: |
-          curl -fsS \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.APP_URL }}/api/cron/dedup-cleanup"
-
-  refresh-tickers:
-    name: Refresh Ticker Master
-    if: github.event.schedule == '0 4 * * 0'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Refresh
-        run: |
-          curl -fsS \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.APP_URL }}/api/cron/refresh-tickers"
+          gh api -X PUT "repos/${REPO}/actions/workflows/cron.yml/enable"
+          echo "Inactivity clock reset."

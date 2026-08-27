@@ -5,109 +5,113 @@
 ```
 project-stein/
 ├── src/
-│   ├── app/                        # Next.js App Router pages and API routes
-│   │   ├── layout.tsx
-│   │   ├── page.tsx                # Signal feed (main page)
-│   │   ├── watchlist/page.tsx      # Manage tickers (Phase 9)
-│   │   ├── stats/page.tsx          # Validation dashboard (Phase 12)
+│   ├── proxy.ts                    # Next 16 route proxy (replaces middleware.ts).
+│   │                               # Deny-by-default auth + legacy redirects.
+│   ├── app/
+│   │   ├── page.tsx                # Today's brief
+│   │   ├── actions.ts              # signOut, runBriefNow, setDefaultModel
+│   │   ├── (auth)/login/page.tsx   # Email + password
+│   │   ├── briefs/                 # Archive + [id] detail
+│   │   ├── scoreboard/page.tsx     # Alpha vs SPY, hit rate, full history
+│   │   ├── portfolio/              # Positions, manual entry, watchlist, push
 │   │   └── api/
 │   │       ├── cron/
-│   │       │   ├── ingest/route.ts         # Fetches RSS feeds
-│   │       │   ├── analyze/route.ts        # Runs filter + LLM pipeline
-│   │       │   ├── validate/route.ts       # Fills signal_outcomes
-│   │       │   ├── refresh-tickers/route.ts
-│   │       │   └── dedup-cleanup/route.ts
-│   │       ├── stats/route.ts              # Returns validation stats JSON
-│   │       ├── push/subscribe/route.ts     # Saves push subscription
-│   │       └── health/route.ts             # Ops health check
-│   ├── lib/
-│   │   ├── supabase/
-│   │   │   ├── client.ts           # Browser client (anon key)
-│   │   │   └── server.ts           # Server clients: createServerClient (session) + createServiceClient (service role)
-│   │   ├── repositories/           # ALL Supabase access lives here — nowhere else
-│   │   │   ├── sourceRepo.ts
-│   │   │   ├── articleRepo.ts
-│   │   │   ├── analysisRepo.ts
-│   │   │   ├── signalRepo.ts
-│   │   │   ├── watchlistRepo.ts
-│   │   │   ├── outcomeRepo.ts
-│   │   │   ├── tickerMasterRepo.ts
-│   │   │   ├── dedupRepo.ts
-│   │   │   └── pushRepo.ts
-│   │   ├── services/               # Business logic — calls repos, never Supabase directly
-│   │   │   ├── rssService.ts       # Fetches and stores RSS items (Phase 3)
-│   │   │   ├── filterService.ts    # Pre-LLM filter pipeline (Phase 5)
-│   │   │   ├── llmService.ts       # Gemini + Groq calls (Phase 6)
-│   │   │   ├── priceService.ts     # yahoo-finance2 price fetching (Phase 8)
-│   │   │   ├── validationService.ts # Fills signal_outcomes, computes stats (Phase 8)
-│   │   │   ├── tickerMasterService.ts # NASDAQ Trader CSV refresh (Phase 4)
-│   │   │   └── pushService.ts      # Web Push sending (Phase 11)
-│   │   └── prompts/
-│   │       └── sentimentPrompt.ts  # LLM system prompt (Phase 6)
-│   └── components/                 # React components (Phase 10+)
-│       ├── SignalCard.tsx
-│       ├── FeedToggle.tsx
-│       └── LegalFooter.tsx
-├── supabase/
-│   └── migrations/
-│       └── 0001_initial_schema.sql
-├── public/
-│   ├── manifest.json               # PWA manifest (Phase 11)
-│   └── sw.js                       # Service worker (Phase 11)
-├── .github/
-│   └── workflows/
-│       └── cron.yml                # GitHub Actions cron (Phase 7)
-├── docs/                           # This folder — living documentation
-└── .env.local                      # Never committed; see .env.example
+│   │       │   ├── ingest/         # RSS → articles
+│   │       │   ├── select/         # regex filter, marks passed_filter (NO LLM)
+│   │       │   ├── sync-positions/ # IBKR Flex
+│   │       │   ├── brief/          # generate (?dry_run=1, ?type=, ?model=, ?heal=1)
+│   │       │   ├── brief-pack/     # hands the Actions worker its prompt
+│   │       │   ├── brief-result/   # receives the worker's output
+│   │       │   ├── score/          # nightly ledger pricing
+│   │       │   ├── cleanup/        # hashes, context packs, old articles
+│   │       │   └── refresh-tickers/
+│   │       ├── briefs/[id]/status/ # poll target for the Run Now panel
+│   │       ├── push/{subscribe,unsubscribe}/
+│   │       └── health/             # public, 200 ok / 503 degraded
+│   ├── components/                 # Nav, BriefView, RunNowPanel, OpsBanner,
+│   │                               # PushToggle, LegalFooter
+│   └── lib/
+│       ├── marketCalendar.ts       # NYSE trading days + holidays
+│       ├── briefHtml.ts            # email template (pure string building)
+│       ├── supabase/               # client.ts, server.ts
+│       ├── repositories/           # ALL Supabase access lives here
+│       │   ├── articleRepo.ts  sourceRepo.ts  dedupRepo.ts
+│       │   ├── tickerMasterRepo.ts  watchlistRepo.ts  pushRepo.ts
+│       │   ├── positionRepo.ts  briefRepo.ts
+│       │   └── recommendationRepo.ts  settingsRepo.ts
+│       ├── services/               # business logic — calls repos, never Supabase
+│       │   ├── rssService.ts       filterService.ts    tickerMasterService.ts
+│       │   ├── flexService.ts      marketDataService.ts contextPackService.ts
+│       │   ├── modelRegistry.ts    llmClient.ts        briefService.ts
+│       │   ├── dispatchService.ts  emailService.ts     pushService.ts
+│       │   ├── scoringService.ts   opsService.ts
+│       └── prompts/briefPrompt.ts
+├── supabase/migrations/            # 0001 … 0004, applied by hand in the SQL editor
+├── .github/workflows/
+│   ├── cron.yml                    # one job, one routing table, + keepalive
+│   └── brief-worker.yml            # runs `claude -p` on the owner's subscription
+└── docs/                           # this folder — the project's operating system
 ```
 
 ## Hard rules
 
-1. **No Supabase calls outside `src/lib/repositories/`.**
-   Services call repos. API routes call services or repos. Never `createClient()` in a service file.
-
-2. **No React/Next.js imports in `src/lib/`.**
-   The entire `lib/` folder is framework-agnostic. Pure TypeScript.
-
-3. **`createServiceClient()` is backend-only.**
-   It holds the service role key. Never expose it to browser code (never in a client component or any file that imports `'use client'`).
-
+1. **No Supabase calls outside `src/lib/repositories/`.** Services call repos;
+   routes call services. Never `createClient()` in a service.
+2. **No React/Next imports in `src/lib/`.** The whole folder is plain TypeScript.
+   (`briefHtml.ts` renders email as strings for exactly this reason.)
+3. **`createServiceClient()` is server-only.** Never in a `'use client'` file.
 4. **`SUPABASE_SERVICE_ROLE_KEY` is never `NEXT_PUBLIC_`.**
-   All env vars without `NEXT_PUBLIC_` prefix are server-side only.
+5. **Every `/api/cron/*` route checks `Authorization: Bearer ${CRON_SECRET}`** and
+   returns 401 otherwise.
+6. **LLM budget: ≤2 large brief calls per scheduled day** (plus on-demand runs the
+   owner triggers). If a change would reintroduce per-article model calls, it is
+   the wrong change — that is what 2.0 exists to undo.
+7. **Never store a recommendation that cannot be scored.** Validation drops
+   unknown tickers and wrong-side invalidations rather than persisting them.
+8. **Update `docs/phases-log.md` at the end of every phase.**
 
-5. **All cron routes require `Authorization: Bearer ${CRON_SECRET}` header.**
-   Return 401 otherwise. GitHub Actions provides this header.
+## Conventions
 
-## Key type conventions
+- Repos export hand-written types: `X` is a full row, `NewX` an insert payload.
+- Timestamps are ISO `string` (Supabase returns them that way).
+- Server components + URL state by default. `RunNowPanel` is the only client
+  component, because subscription-backed briefs complete asynchronously.
+- Long-running routes export `maxDuration` (`brief` 300, `sync-positions` 60).
 
-- All repo files export their own plain TypeScript types (not Supabase auto-generated types).
-- `NewX` types are insert payloads (no `id`, no `created_at`).
-- `X` types are full DB rows.
-- Timestamps are `string` (ISO 8601) — Supabase returns them as strings over the API.
+## Cron schedule (all UTC)
 
-## Cron schedule (GitHub Actions)
+Routing lives in one `case` block in `cron.yml`; an unmapped schedule **fails the
+run** rather than silently doing nothing.
 
-| Schedule | What runs |
+| Cron | Endpoints |
 |---|---|
-| Every 10 min, Mon–Fri 14:30–21:00 UTC (market hours) | ingest + analyze |
-| Every 30 min otherwise | ingest + analyze |
-| Every 2 hr overnight + weekends | ingest + analyze |
-| Daily 02:00 UTC | validate |
-| Daily 03:00 UTC | dedup-cleanup |
-| Sundays 04:00 UTC | refresh-tickers |
+| `*/30 11-22 * * 1-5` | ingest, select |
+| `0 0-10,23 * * *` · `0 * * * 0,6` | ingest, select (off-hours, weekends) |
+| `30 10 * * 1-5` · `0 21 * * 1-5` | sync-positions |
+| `0 11 * * 1-5` · `45 11 * * 1-5` | brief (pre-market, then retry + heal) |
+| `30 21 * * 1-5` · `15 22 * * 1-5` | brief (evening, then retry + heal) |
+| `0 2 * * 2-6` | score |
+| `0 3 * * *` | cleanup |
+| `0 4 * * 0` | refresh-tickers |
+| `0 5 1 * *` | keepalive (re-enables the workflow) |
+
+DST is not tracked: schedules are fixed UTC, so brief times shift one hour
+against ET in winter. Accepted deliberately — the evening slot still lands after
+the close year-round.
 
 ## Environment variables
 
-See `.env.example` for the full list. Key ones:
-
 | Variable | Used by |
 |---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` | Both browser and server clients |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser client, session server client |
-| `SUPABASE_SERVICE_ROLE_KEY` | `createServiceClient()` only — bypasses RLS |
-| `GEMINI_API_KEY` | llmService |
-| `GROQ_API_KEY` | llmService (fallback) |
-| `CRON_SECRET` | All `/api/cron/*` routes + GitHub Actions secret |
-| `NEXT_PUBLIC_VAPID_PUBLIC_KEY` | Browser push subscription |
-| `VAPID_PRIVATE_KEY` | pushService (server-side signing) |
-| `SEC_USER_AGENT` | rssService — SEC requires contact info in UA header |
+| `NEXT_PUBLIC_SUPABASE_URL` / `_ANON_KEY` | browser + session clients |
+| `SUPABASE_SERVICE_ROLE_KEY` | `createServiceClient()` only |
+| `CRON_SECRET` | every `/api/cron/*` + GitHub secret |
+| `GEMINI_API_KEY` / `GROQ_API_KEY` | `llmClient` |
+| `IBKR_FLEX_TOKEN` / `IBKR_FLEX_QUERY_ID` | `flexService` |
+| `RESEND_API_KEY` / `BRIEF_RECIPIENT_EMAIL` / `BRIEF_FROM_EMAIL` | `emailService` |
+| `GITHUB_DISPATCH_TOKEN` / `GITHUB_REPO` | `dispatchService` |
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | push |
+| `SEC_USER_AGENT` | `rssService` (SEC requires contact info) |
+| `NEXT_PUBLIC_APP_URL` | email "Open Stein" link |
+
+GitHub Actions secrets: `CRON_SECRET`, `APP_URL`, `CLAUDE_CODE_OAUTH_TOKEN`.

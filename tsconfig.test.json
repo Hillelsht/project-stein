@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "outDir": ".test-build",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2022",
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
+  },
+  "include": ["tests/**/*.ts", "src/lib/**/*.ts"]
+}
