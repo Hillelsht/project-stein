@@ -9,24 +9,33 @@ name: Project Stein Cron
 # schedule fails the run loudly instead of doing nothing.
 
 on:
-  schedule:
-    # ── Ingest + select (news for the brief; no LLM calls) ──
-    - cron: '*/30 11-22 * * 1-5'   # market hours, every 30 min
-    - cron: '0 0-10,23 * * *'      # off-hours, hourly
-    - cron: '0 * * * 0,6'          # weekends, hourly
-    # ── Portfolio sync, 30 min before each brief ──
-    - cron: '30 10 * * 1-5'
-    - cron: '0 21 * * 1-5'
-    # ── Briefs (each slot fires twice; the second retries and heals) ──
-    - cron: '0 11 * * 1-5'         # pre-market, 07:00 EDT
-    - cron: '45 11 * * 1-5'
-    - cron: '30 21 * * 1-5'        # evening wrap, 17:30 EDT
-    - cron: '15 22 * * 1-5'
-    # ── Housekeeping ──
-    - cron: '0 2 * * 2-6'          # score recommendations after each close
-    - cron: '0 3 * * *'            # cleanup
-    - cron: '0 4 * * 0'            # refresh ticker master
-    - cron: '0 5 1 * *'            # monthly keepalive (see below)
+  # ── SCHEDULE PAUSED ─────────────────────────────────────────────────────
+  # Paused 2026-10-13 while the app is still being configured. The cron was
+  # reaching the app fine, but /api/cron/brief returned 500 because the
+  # Supabase 2.0 tables did not exist yet, so every run emailed a failure.
+  #
+  # TO RESUME: delete the "# " prefix from each cron line below. Do this only
+  # once /setup reports "Ready to run" — otherwise the failure emails return.
+  #
+  # schedule:
+  # # ── Ingest + select (news for the brief; no LLM calls) ──
+  # - cron: '*/30 11-22 * * 1-5'   # market hours, every 30 min
+  # - cron: '0 0-10,23 * * *'      # off-hours, hourly
+  # - cron: '0 * * * 0,6'          # weekends, hourly
+  # # ── Portfolio sync, 30 min before each brief ──
+  # - cron: '30 10 * * 1-5'
+  # - cron: '0 21 * * 1-5'
+  # # ── Briefs (each slot fires twice; the second retries and heals) ──
+  # - cron: '0 11 * * 1-5'         # pre-market, 07:00 EDT
+  # - cron: '45 11 * * 1-5'
+  # - cron: '30 21 * * 1-5'        # evening wrap, 17:30 EDT
+  # - cron: '15 22 * * 1-5'
+  # # ── Housekeeping ──
+  # - cron: '0 2 * * 2-6'          # score recommendations after each close
+  # - cron: '0 3 * * *'            # cleanup
+  # - cron: '0 4 * * 0'            # refresh ticker master
+  # - cron: '0 5 1 * *'            # monthly keepalive (see below)
+  #
   workflow_dispatch:
     inputs:
       endpoints:
